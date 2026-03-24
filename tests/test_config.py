@@ -1,14 +1,11 @@
 """
-Tests for pipeline config CLI helpers.
+Config tests — .env file read/write helpers.
 
-All tests are pure — they use tmp_path and never touch the real .env.
-No CLI invocation; the pure functions _set_env_key and _read_env_keys
-are tested directly.
-
+All tests are pure — they use tmp_path and never touch the real .env file.
 Tests cover:
   - _read_env_keys: standard parsing, comments, blank lines, quoted values
   - _set_env_key: write new key, update existing, preserve other keys,
-                  create file if missing, handle file with no trailing newline
+                  create file if missing, handle no trailing newline
 """
 
 from __future__ import annotations

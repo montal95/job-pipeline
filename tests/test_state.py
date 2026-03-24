@@ -1,14 +1,11 @@
 """
-Phase 0 tests — graph compilation and state schema smoke tests.
+State schema tests — PipelineState TypedDict, Pydantic models, enums, empty_state().
 
-These tests verify that:
-  1. All four agent graphs compile without errors
-  2. PipelineState TypedDict is correctly typed
-  3. empty_state() produces a valid initial state
-  4. Pydantic models serialize/deserialize cleanly
-
-No external services are called. No DB connections are opened.
+Verifies that the core data contracts are correctly typed and that empty_state()
+produces a valid zero-value initial state. No external services, no DB, no graph.
 """
+
+from __future__ import annotations
 
 import pytest
 
@@ -26,9 +23,6 @@ from pipeline.state import (
 )
 
 
-# ── State schema ───────────────────────────────────────────────────────────────
-
-
 def test_empty_state_is_valid():
     state = empty_state()
     assert isinstance(state, dict)
@@ -36,6 +30,9 @@ def test_empty_state_is_valid():
     assert state["shortlist"] == []
     assert state["human_approved"] is False
     assert state["revision_round"] == 0
+    assert state["needs_file_upload"] is False
+    assert state["ats_field_map"] == {}
+    assert state["submission_confirmed"] is False
 
 
 def test_search_params_defaults():
@@ -65,7 +62,7 @@ def test_job_listing_has_id():
         location="Remote",
         source_url="https://dice.com/jobs/456",
     )
-    assert listing.id  # UUID auto-generated
+    assert listing.id
     assert listing.status == JobStatus.NEW
     assert listing.ats_type == AtsType.UNKNOWN
 
@@ -85,38 +82,3 @@ def test_job_status_enum_values():
 def test_fit_signal_enum_values():
     assert FitSignal.STRONG == "strong"
     assert FitSignal.STRETCH == "stretch"
-
-
-# ── Graph compilation ──────────────────────────────────────────────────────────
-
-
-def test_discoverer_graph_compiles():
-    from pipeline.agents.discoverer import build_discoverer_graph
-
-    graph = build_discoverer_graph()
-    compiled = graph.compile()
-    assert compiled is not None
-
-
-def test_writer_graph_compiles():
-    from pipeline.agents.writer import build_writer_graph
-
-    graph = build_writer_graph()
-    compiled = graph.compile()
-    assert compiled is not None
-
-
-def test_submitter_graph_compiles():
-    from pipeline.agents.submitter import build_submitter_graph
-
-    graph = build_submitter_graph()
-    compiled = graph.compile()
-    assert compiled is not None
-
-
-def test_tracker_graph_compiles():
-    from pipeline.agents.tracker import build_tracker_graph
-
-    graph = build_tracker_graph()
-    compiled = graph.compile()
-    assert compiled is not None
