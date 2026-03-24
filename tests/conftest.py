@@ -125,3 +125,59 @@ def mock_llm_message():
     msg = MagicMock()
     msg.content = [MagicMock(text=(FIXTURES / "sample_resume_llm_response.json").read_text(encoding="utf-8"))]
     return msg
+
+
+@pytest.fixture()
+def tracker_db(tmp_path):
+    """
+    SQLite DB with all migrations applied and a small set of jobs + submissions
+    pre-inserted for Tracker agent tests.
+
+    Jobs:
+      tracker-job-001  status=applied   → has an overdue submission (sub-001)
+      tracker-job-002  status=applied   → has a future-due submission (sub-002)
+      tracker-job-003  status=rejected  → no submission; used to verify ignored by overdue logic
+
+    The job IDs are stable strings (not UUIDs) so test assertions are readable.
+    """
+    from tests.fixtures.sample_submissions import (
+        SAMPLE_SUBMISSIONS,
+        TRACKER_JOB_ID_APPLIED,
+        TRACKER_JOB_ID_APPLIED_FUTURE,
+        TRACKER_JOB_ID_REJECTED,
+    )
+
+    db_path = str(tmp_path / "tracker_pipeline.db")
+    conn = sqlite3.connect(db_path)
+
+    migrations_dir = Path(__file__).parent.parent / "migrations"
+    for migration_file in sorted(migrations_dir.glob("*.sql")):
+        try:
+            conn.executescript(migration_file.read_text())
+        except sqlite3.OperationalError:
+            pass  # duplicate column — already applied
+    conn.commit()
+
+    jobs = [
+        (TRACKER_JOB_ID_APPLIED,        "Senior Rails Engineer", "Acme Health",   "Chicago, IL", "applied"),
+        (TRACKER_JOB_ID_APPLIED_FUTURE,  "Backend Engineer",     "Startup Inc",   "Remote",      "applied"),
+        (TRACKER_JOB_ID_REJECTED,        "AI Engineer",          "DataCo",        "New York, NY","rejected"),
+    ]
+    for job_id, title, company, location, status in jobs:
+        conn.execute(
+            "INSERT INTO jobs (id, title, company, location, source, source_url, "
+            "discovered_at, status, fingerprint) VALUES (?, ?, ?, ?, 'indeed', 'http://x', "
+            "datetime('now'), ?, '')",
+            (job_id, title, company, location, status),
+        )
+
+    for sub in SAMPLE_SUBMISSIONS:
+        conn.execute(
+            "INSERT INTO submissions (id, job_id, submitted_at, followup_due_date) "
+            "VALUES (?, ?, ?, ?)",
+            (sub["id"], sub["job_id"], sub["submitted_at"], sub["followup_due_date"]),
+        )
+
+    conn.commit()
+    conn.close()
+    return db_path

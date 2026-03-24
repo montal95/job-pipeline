@@ -176,6 +176,9 @@ class PipelineState(TypedDict):
     ats_field_map: dict[str, str]    # label → CSS selector, set by scan_form
     submission_confirmed: bool       # set by capture_confirmation
 
+    # Tracker
+    tracker_new_status: str | None   # target status for update_status node
+
     # Human-in-the-loop signals
     human_approved: bool
     human_feedback: str | None
@@ -206,6 +209,7 @@ def empty_state() -> PipelineState:
         needs_file_upload=False,
         ats_field_map={},
         submission_confirmed=False,
+        tracker_new_status=None,
         human_approved=False,
         human_feedback=None,
         errors=[],
