@@ -88,7 +88,7 @@ def _extract_job_gaps(cv_text: str, job_description: str) -> list[str]:
     seen: set[str] = set()
 
     for token in tokens:
-        word = token.lower()
+        word = token.lower().rstrip(".,;:!?()")
         if len(word) < 4:
             continue
         if word in _STOP_WORDS:
@@ -261,7 +261,7 @@ def _render_resume_docx(content: ResumeContent, output_path: str) -> str:
     doc.save(output_path)
 
     # One-page heuristic warning
-    total_chars = sum(
+    total_chars = (
         len(content.summary) + len(" ".join(content.skills))
         + sum(len(b) for s in content.sections for b in s.bullets)
     )
