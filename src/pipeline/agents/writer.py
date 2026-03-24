@@ -320,21 +320,159 @@ def _render_cover_letter_docx(content: CoverLetterContent, output_path: str) -> 
 
 
 def load_job(state: PipelineState) -> dict:
-    """Fetch job record from DB by current_job_id. Commit 8 target."""
-    return {}
+    """
+    Fetch job record from DB by current_job_id and add to shortlist.
+
+    Skips if the job is already present in shortlist (CLI may pre-populate it).
+    Uses sync sqlite3 directly — no aiosqlite — to avoid running a new event
+    loop inside the async graph execution context.
+    """
+    import sqlite3
+
+    job_id = state.get("current_job_id")
+    if not job_id:
+        return {"errors": state.get("errors", []) + ["load_job: current_job_id not set"]}
+
+    # Already in shortlist — nothing to do
+    if any(j.id == job_id for j in state.get("shortlist", [])):
+        return {}
+
+    db_path = str(settings.app_db_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    finally:
+        conn.close()
+
+    if row is None:
+        return {
+            "errors": state.get("errors", []) + [f"load_job: job '{job_id}' not found in DB"]
+        }
+
+    job = JobListing.model_validate({
+        "id": row["id"],
+        "title": row["title"],
+        "company": row["company"],
+        "location": row["location"],
+        "workplace_type": row["workplace_type"],
+        "source": row["source"],
+        "source_url": row["source_url"],
+        "apply_url": row["apply_url"],
+        "ats_type": row["ats_type"] or "unknown",
+        "description": row["description"],
+        "compensation_low": row["compensation_low"],
+        "compensation_high": row["compensation_high"],
+        "posted_date": row["posted_date"],
+        "discovered_at": row["discovered_at"],
+        "status": row["status"],
+        "fit_signal": row["fit_signal"],
+        "company_headcount": row["company_headcount"],
+        "fingerprint": row["fingerprint"] or "",
+        "resume_path": row["resume_path"],
+        "cover_letter_path": row["cover_letter_path"],
+        "notes": row["notes"],
+    })
+
+    return {"shortlist": state.get("shortlist", []) + [job]}
 
 
 def fetch_cv(state: PipelineState) -> dict:
-    """Read CV from CV_PATH, extract text. Cached after first call. Commit 8 target."""
-    return {}
+    """
+    Read the CV from settings.cv_path and cache the extracted text in state.
+    Skips if cv_text is already populated (supports resume-from-checkpoint).
+    """
+    if state.get("cv_text"):
+        return {}
+
+    cv_text = _load_cv_text(settings.cv_path)
+    return {"cv_text": cv_text}
 
 
 def research_company(state: PipelineState) -> dict:
     """
-    Web search for headcount, mission, recent news.
-    Results cached in company_cache table. Commit 8 target.
+    Look up company context from the company_cache DB table.
+    Falls back to a lightweight DuckDuckGo Instant Answer API call if no cache
+    entry exists, then writes the result back to the cache for future runs.
+
+    Stores a formatted string in state["company_context"] for use by the
+    resume and cover letter prompts. Skips if already cached in state.
     """
-    return {}
+    import sqlite3
+    from datetime import datetime, timezone
+
+    if state.get("company_context"):
+        return {}
+
+    job = next(
+        (j for j in state.get("shortlist", []) if j.id == state.get("current_job_id")),
+        None,
+    )
+    if not job:
+        return {}
+
+    db_path = str(settings.app_db_path)
+
+    # ── Check DB cache ─────────────────────────────────────────────────────────
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT * FROM company_cache WHERE company_name = ?",
+            (job.company,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if row:
+        parts: list[str] = []
+        if row["headcount"]:
+            parts.append(f"Headcount: ~{row['headcount']} employees")
+        if row["mission"]:
+            parts.append(f"Mission: {row['mission']}")
+        if row["recent_news"]:
+            parts.append(f"Recent news: {row['recent_news']}")
+        if parts:
+            return {"company_context": "\n".join(parts)}
+
+    # ── Lightweight web fallback ───────────────────────────────────────────────
+    context = f"Company: {job.company}"
+    try:
+        import httpx
+        resp = httpx.get(
+            "https://api.duckduckgo.com/",
+            params={"q": f"{job.company} company", "format": "json", "no_html": "1"},
+            timeout=8,
+            follow_redirects=True,
+        )
+        data = resp.json()
+        abstract = data.get("Abstract", "").strip()
+        if abstract:
+            context = f"{job.company}: {abstract}"
+        elif data.get("RelatedTopics"):
+            first = data["RelatedTopics"][0]
+            if isinstance(first, dict) and first.get("Text"):
+                context = f"{job.company}: {first['Text']}"
+    except Exception:
+        pass  # network failure is non-fatal; writer proceeds with minimal context
+
+    # ── Write to cache ─────────────────────────────────────────────────────────
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO company_cache (company_name, mission, cached_at)
+            VALUES (?, ?, ?)
+            """,
+            (job.company, context, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+    return {"company_context": context}
 
 
 def pre_write_interview(state: PipelineState) -> dict:
@@ -523,7 +661,35 @@ def apply_feedback(state: PipelineState) -> dict:
 
 
 def persist_documents(state: PipelineState) -> dict:
-    """Update jobs row with doc paths, set status → docs_ready. Commit 8 target."""
+    """
+    Update the jobs row with generated document paths and advance status to docs_ready.
+    Uses sync sqlite3 — same rationale as load_job.
+    """
+    import sqlite3
+
+    job_id = state.get("current_job_id")
+    if not job_id:
+        return {}
+
+    db_path = str(settings.app_db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            UPDATE jobs
+               SET resume_path = ?,
+                   cover_letter_path = ?,
+                   status = 'docs_ready'
+             WHERE id = ?
+            """,
+            (state.get("resume_path"), state.get("cover_letter_path"), job_id),
+        )
+        conn.commit()
+    except Exception as exc:
+        return {"errors": state.get("errors", []) + [f"persist_documents: {exc}"]}
+    finally:
+        conn.close()
+
     return {}
 
 
