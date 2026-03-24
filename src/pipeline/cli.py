@@ -539,14 +539,26 @@ def track():
 
 
 async def _track():
-    from pipeline.graph import build_pipeline
+    from pathlib import Path
+
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+    from pipeline.agents.tracker import build_tracker_graph
     from pipeline.state import empty_state
+
     thread_id = f"track-{datetime.utcnow().date()}"
-    console.print(f"[bold magenta]Tracker[/bold magenta] — thread: {thread_id}")
-    graph = await build_pipeline(thread_id)
+    checkpointer_path = "./data/checkpoints.db"
+    Path(checkpointer_path).parent.mkdir(parents=True, exist_ok=True)
+
+    console.print(f"[bold magenta]Tracker[/bold magenta] — thread: [dim]{thread_id}[/dim]")
+
     config = {"configurable": {"thread_id": thread_id}}
-    await graph.ainvoke(empty_state(), config=config)
-    console.print("[dim]Tracker run complete (Phase 5 target)[/dim]")
+
+    async with await AsyncSqliteSaver.from_conn_string(checkpointer_path) as checkpointer:
+        graph = build_tracker_graph().compile(checkpointer=checkpointer)
+        await graph.ainvoke(empty_state(), config=config)
+
+    console.print("[bold green]✓ Tracker complete.[/bold green]")
 
 
 # ── Run (full pipeline) ────────────────────────────────────────────────────────
@@ -563,16 +575,42 @@ def run_pipeline(
 
 
 async def _run_pipeline(query: str, location: str, remote: bool):
-    from pipeline.graph import build_pipeline
-    from pipeline.state import SearchParams, empty_state
-    thread_id = f"run-{datetime.utcnow().date()}-{str(uuid4())[:8]}"
-    console.print(f"[bold]Full pipeline[/bold] — thread: {thread_id}")
-    graph = await build_pipeline(thread_id)
-    initial = empty_state()
-    initial["search_params"] = SearchParams(query=query, location=location, remote=remote)
-    config = {"configurable": {"thread_id": thread_id}}
-    await graph.ainvoke(initial, config=config)
-    console.print("[dim]Pipeline run complete (Phase 0 stub)[/dim]")
+    """
+    Full pipeline: discover → write queued jobs → submit → track.
+
+    1. Run discovery with the given search params.
+    2. After triage, query the DB for all jobs at status=queued.
+    3. For each queued job, run writer then submitter.
+    4. Run tracker dashboard at the end.
+    """
+    import sqlite3
+
+    from pipeline.config import settings
+
+    # Step 1: Discovery + triage
+    await _discover(query, location, remote, settings.enabled_sources)
+
+    # Step 2: Find jobs approved during triage (status=queued)
+    db_path = str(settings.app_db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id FROM jobs WHERE status = 'queued'"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    queued_ids = [row[0] for row in rows]
+    if not queued_ids:
+        console.print("[dim]No queued jobs — skipping write/submit.[/dim]")
+    else:
+        console.print(f"[bold]{len(queued_ids)} job(s) queued — running writer + submitter...[/bold]")
+        for job_id in queued_ids:
+            await _write(job_id)
+            await _submit(job_id)
+
+    # Step 3: Tracker dashboard
+    await _track()
 
 
 # ── DB management ──────────────────────────────────────────────────────────────
