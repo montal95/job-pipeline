@@ -1,5 +1,5 @@
 """
-Writer Agent — Phase 3 implementation target.
+Writer Agent — Phase 3 implementation.
 
 Responsibility: Generate a tailored resume and cover letter (.docx) for a
 specific job listing using the user's CV as the source of truth.
@@ -8,36 +8,331 @@ LangGraph patterns exercised here:
   - interrupt() for the pre-write interview and review gates
   - Cycles: the feedback revision loop (write → review → revise → review)
   - Structured LLM output as rendering input (not final artifact)
-
-Current state: Phase 0 stubs.
 """
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
+import anthropic
+from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Pt
 from langgraph.graph import END, StateGraph
 from langgraph.types import interrupt
 
-from pipeline.config import LLM_MODEL, settings  # noqa: F401 — used in Phase 3
-from pipeline.state import PipelineState
+from pipeline.config import LLM_MODEL, settings
+from pipeline.state import (
+    CoverLetterContent,
+    JobListing,
+    PipelineState,
+    ResumeContent,
+)
+
+# ── Stop words for gap extraction ──────────────────────────────────────────────
+
+_STOP_WORDS = {
+    "experience", "required", "strong", "skills", "plus", "with", "the",
+    "and", "for", "our", "you", "will", "must", "have", "team", "using",
+    "work", "build", "design", "maintain", "deploy", "manage", "collaborate",
+    "familiarity", "preferred", "ability", "knowledge", "understanding",
+    "including", "across", "within", "between", "through", "from", "into",
+    "that", "this", "their", "they", "your", "platform", "systems", "service",
+    "services", "applications", "application", "tools", "tool", "solutions",
+    "solution", "environment", "environments", "data", "product", "products",
+}
 
 
-# ── Node stubs ─────────────────────────────────────────────────────────────────
+# ── Pure helper functions ──────────────────────────────────────────────────────
+
+
+def _load_cv_text(cv_path: str) -> str:
+    """
+    Read CV content from disk. Handles both plain text and PDF.
+    PDF import is lazy so tests using .txt fixtures don't need pypdf installed.
+    Raises FileNotFoundError if the path does not exist.
+    """
+    path = Path(cv_path)
+    if not path.exists():
+        raise FileNotFoundError(f"CV not found at: {cv_path}")
+
+    if path.suffix.lower() == ".pdf":
+        import pypdf  # lazy — only needed at runtime with a real CV
+        reader = pypdf.PdfReader(str(path))
+        return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+    return path.read_text(encoding="utf-8")
+
+
+def _extract_job_gaps(cv_text: str, job_description: str) -> list[str]:
+    """
+    Identify keywords from the job description that are absent from the CV.
+
+    Strategy:
+      1. Tokenize the JD into words, strip punctuation.
+      2. Keep words >= 4 chars that aren't in the stop-word list.
+      3. For each candidate keyword, check if it appears anywhere in the CV
+         (case-insensitive substring match).
+      4. Return those that don't appear — these are the gaps.
+
+    Returns a list of gap keyword strings (lowercased).
+    """
+    cv_lower = cv_text.lower()
+
+    # Tokenize JD: split on whitespace, strip punctuation
+    tokens = re.findall(r"[a-zA-Z][a-zA-Z0-9+#.-]*", job_description)
+
+    gaps: list[str] = []
+    seen: set[str] = set()
+
+    for token in tokens:
+        word = token.lower()
+        if len(word) < 4:
+            continue
+        if word in _STOP_WORDS:
+            continue
+        if word in seen:
+            continue
+        seen.add(word)
+        if word not in cv_lower:
+            gaps.append(word)
+
+    return gaps
+
+
+def _build_resume_prompt(
+    cv_text: str,
+    job: JobListing,
+    answers: dict[str, str],
+) -> str:
+    """Build the system+user prompt for resume generation."""
+    answers_block = (
+        "\n".join(f"- {k}: {v}" for k, v in answers.items())
+        if answers
+        else "None provided."
+    )
+    return (
+        f"You are an expert resume writer. Tailor the candidate's CV for the following role.\n\n"
+        f"TARGET ROLE: {job.title} at {job.company} ({job.location})\n\n"
+        f"JOB DESCRIPTION:\n{job.description or 'Not provided.'}\n\n"
+        f"CANDIDATE CV:\n{cv_text}\n\n"
+        f"PRE-WRITE INTERVIEW ANSWERS:\n{answers_block}\n\n"
+        "Return ONLY a valid JSON object matching this schema — no preamble, no markdown fences:\n"
+        '{"name": str, "contact": str, "summary": str, '
+        '"sections": [{"heading": str, "bullets": [str]}], "skills": [str]}'
+    )
+
+
+def _build_cover_letter_prompt(
+    cv_text: str,
+    job: JobListing,
+    answers: dict[str, str],
+) -> str:
+    """Build the system+user prompt for cover letter generation."""
+    answers_block = (
+        "\n".join(f"- {k}: {v}" for k, v in answers.items())
+        if answers
+        else "None provided."
+    )
+    return (
+        f"You are an expert cover letter writer. Write a compelling, concise cover letter.\n\n"
+        f"TARGET ROLE: {job.title} at {job.company} ({job.location})\n\n"
+        f"JOB DESCRIPTION:\n{job.description or 'Not provided.'}\n\n"
+        f"CANDIDATE CV:\n{cv_text}\n\n"
+        f"PRE-WRITE INTERVIEW ANSWERS:\n{answers_block}\n\n"
+        "Return ONLY a valid JSON object matching this schema — no preamble, no markdown fences:\n"
+        '{"opening": str, "body_paragraphs": [str], "closing": str}'
+    )
+
+
+def _parse_resume_json(raw: str) -> ResumeContent:
+    """
+    Parse raw LLM output into a ResumeContent model.
+    Raises pydantic.ValidationError if required fields are missing or malformed.
+    Strips markdown code fences if the model added them despite instructions.
+    """
+    cleaned = re.sub(r"^```[a-z]*\n?", "", raw.strip(), flags=re.MULTILINE)
+    cleaned = re.sub(r"\n?```$", "", cleaned.strip(), flags=re.MULTILINE)
+    return ResumeContent.model_validate_json(cleaned.strip())
+
+
+def _parse_cover_letter_json(raw: str) -> CoverLetterContent:
+    """
+    Parse raw LLM output into a CoverLetterContent model.
+    Raises pydantic.ValidationError if required fields are missing or malformed.
+    Strips markdown code fences if present.
+    """
+    cleaned = re.sub(r"^```[a-z]*\n?", "", raw.strip(), flags=re.MULTILINE)
+    cleaned = re.sub(r"\n?```$", "", cleaned.strip(), flags=re.MULTILINE)
+    return CoverLetterContent.model_validate_json(cleaned.strip())
+
+
+def _add_hyperlink(paragraph, text: str, url: str) -> None:
+    """
+    Insert a hyperlink run into a paragraph using raw OOXML manipulation.
+    python-docx does not natively support hyperlink runs; this is the
+    standard workaround via relationship + XML element construction.
+    """
+    part = paragraph.part
+    r_id = part.relate_to(
+        url,
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        is_external=True,
+    )
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), r_id)
+
+    run_elem = OxmlElement("w:r")
+    rpr = OxmlElement("w:rPr")
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), "0563C1")
+    rpr.append(color)
+    underline = OxmlElement("w:u")
+    underline.set(qn("w:val"), "single")
+    rpr.append(underline)
+    run_elem.append(rpr)
+
+    t = OxmlElement("w:t")
+    t.text = text
+    run_elem.append(t)
+    hyperlink.append(run_elem)
+    paragraph._p.append(hyperlink)
+
+
+def _render_resume_docx(content: ResumeContent, output_path: str) -> str:
+    """
+    Render a ResumeContent model to a .docx file using python-docx.
+    Returns the output_path on success.
+
+    Layout mirrors the master resume: name as large heading, contact line,
+    horizontal rule, summary, then sections with heading + bullet list.
+    One-page heuristic: warns (via print) if character count exceeds 3,500.
+    """
+    doc = Document()
+
+    # Remove default margins slightly to give more room
+    for section in doc.sections:
+        section.top_margin = Pt(36)
+        section.bottom_margin = Pt(36)
+        section.left_margin = Pt(54)
+        section.right_margin = Pt(54)
+
+    # Name
+    name_para = doc.add_paragraph()
+    name_run = name_para.add_run(content.name)
+    name_run.bold = True
+    name_run.font.size = Pt(14)
+
+    # Contact line
+    doc.add_paragraph(content.contact)
+
+    # Horizontal rule via bottom border on an empty paragraph
+    rule_para = doc.add_paragraph()
+    pPr = rule_para._p.get_or_add_pPr()
+    pBdr = OxmlElement("w:pBdr")
+    bottom = OxmlElement("w:bottom")
+    bottom.set(qn("w:val"), "single")
+    bottom.set(qn("w:sz"), "6")
+    bottom.set(qn("w:space"), "1")
+    bottom.set(qn("w:color"), "000000")
+    pBdr.append(bottom)
+    pPr.append(pBdr)
+
+    # Summary
+    summary_heading = doc.add_paragraph()
+    summary_heading.add_run("PROFESSIONAL SUMMARY").bold = True
+    doc.add_paragraph(content.summary)
+
+    # Skills
+    skills_heading = doc.add_paragraph()
+    skills_heading.add_run("SKILLS & TECHNOLOGIES").bold = True
+    doc.add_paragraph(" | ".join(content.skills))
+
+    # Experience sections
+    for section_obj in content.sections:
+        heading_para = doc.add_paragraph()
+        heading_para.add_run(section_obj.heading.upper()).bold = True
+        for bullet in section_obj.bullets:
+            doc.add_paragraph(bullet, style="List Bullet")
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    doc.save(output_path)
+
+    # One-page heuristic warning
+    total_chars = sum(
+        len(content.summary) + len(" ".join(content.skills))
+        + sum(len(b) for s in content.sections for b in s.bullets)
+    )
+    if total_chars > 3500:
+        print(
+            f"[writer] Warning: resume content is ~{total_chars} chars — "
+            "may exceed one page. Review the rendered .docx."
+        )
+
+    return output_path
+
+
+def _render_cover_letter_docx(content: CoverLetterContent, output_path: str) -> str:
+    """
+    Render a CoverLetterContent model to a .docx file using python-docx.
+    Returns the output_path on success.
+
+    Layout: opening paragraph(s), body paragraphs with spacing, closing.
+    """
+    doc = Document()
+
+    for section in doc.sections:
+        section.top_margin = Pt(54)
+        section.bottom_margin = Pt(54)
+        section.left_margin = Pt(72)
+        section.right_margin = Pt(72)
+
+    # Opening — may contain \n line breaks within the string
+    for line in content.opening.split("\n"):
+        line = line.strip()
+        if line:
+            doc.add_paragraph(line)
+
+    doc.add_paragraph("")  # spacer
+
+    # Body paragraphs
+    for para in content.body_paragraphs:
+        p = doc.add_paragraph(para)
+        p.paragraph_format.space_after = Pt(8)
+
+    doc.add_paragraph("")  # spacer
+
+    # Closing
+    for line in content.closing.split("\n"):
+        line = line.strip()
+        if line:
+            doc.add_paragraph(line)
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    doc.save(output_path)
+
+    return output_path
+
+
+# ── Node stubs (implemented in Commits 6–8) ───────────────────────────────────
 
 
 def load_job(state: PipelineState) -> dict:
-    """Fetch job record from DB by current_job_id. Phase 3 target."""
+    """Fetch job record from DB by current_job_id. Commit 8 target."""
     return {}
 
 
 def fetch_cv(state: PipelineState) -> dict:
-    """Read CV from CV_PATH, extract text. Cached after first call. Phase 3 target."""
+    """Read CV from CV_PATH, extract text. Cached after first call. Commit 8 target."""
     return {}
 
 
 def research_company(state: PipelineState) -> dict:
     """
     Web search for headcount, mission, recent news.
-    Results cached in company_cache table. Phase 3 target.
+    Results cached in company_cache table. Commit 8 target.
     """
     return {}
 
@@ -45,8 +340,7 @@ def research_company(state: PipelineState) -> dict:
 def pre_write_interview(state: PipelineState) -> dict:
     """
     Human-in-the-loop gate: present gap analysis between CV and JD,
-    ask targeted questions, wait for answers.
-    Phase 3 target.
+    ask targeted questions, wait for answers. Commit 7 target.
     """
     interrupt("Answer pre-write questions before document generation begins")
     return {}
@@ -54,42 +348,34 @@ def pre_write_interview(state: PipelineState) -> dict:
 
 def write_resume(state: PipelineState) -> dict:
     """
-    LLM call (Anthropic API): generate resume content as structured JSON.
-    Model: LLM_MODEL. Max revision rounds: settings.max_revision_rounds.
-    Phase 3 target.
+    LLM call (Anthropic API): generate resume content as structured JSON,
+    then render to .docx. Commit 6 target.
     """
     return {"resume_path": None}
 
 
 def write_cover_letter(state: PipelineState) -> dict:
     """
-    LLM call (Anthropic API): generate cover letter content as structured JSON.
-    Phase 3 target.
+    LLM call (Anthropic API): generate cover letter content as structured JSON,
+    then render to .docx. Commit 6 target.
     """
     return {"cover_letter_path": None}
 
 
 def render_resume_docx(state: PipelineState) -> dict:
-    """
-    Deterministic python-docx rendering from structured JSON.
-    No LLM involved. Phase 3 target.
-    """
+    """Deterministic python-docx rendering from structured JSON. Commit 6 target."""
     return {}
 
 
 def render_cover_letter_docx(state: PipelineState) -> dict:
-    """
-    Deterministic python-docx rendering from structured JSON.
-    No LLM involved. Phase 3 target.
-    """
+    """Deterministic python-docx rendering from structured JSON. Commit 6 target."""
     return {}
 
 
 def review_interrupt(state: PipelineState) -> dict:
     """
     Human-in-the-loop gate: show doc paths, ask for feedback or approval.
-    Branches to apply_feedback if feedback given, else exits loop.
-    Phase 3 target.
+    Commit 7 target.
     """
     interrupt("Review generated documents — approve, provide feedback, or abort")
     return {}
@@ -98,14 +384,13 @@ def review_interrupt(state: PipelineState) -> dict:
 def apply_feedback(state: PipelineState) -> dict:
     """
     Targeted LLM call to apply user feedback. Increments revision_round.
-    After max_revision_rounds, exits with docs_draft status and a warning.
-    Phase 3 target.
+    Commit 6 target.
     """
     return {"revision_round": state.get("revision_round", 0) + 1}
 
 
 def persist_documents(state: PipelineState) -> dict:
-    """Update jobs row with doc paths, set status → docs_ready. Phase 3 target."""
+    """Update jobs row with doc paths, set status → docs_ready. Commit 8 target."""
     return {}
 
 
@@ -174,7 +459,6 @@ def build_writer_graph() -> StateGraph:
     graph.add_edge("render_resume_docx", "render_cover_letter_docx")
     graph.add_edge("render_cover_letter_docx", "review_interrupt")
 
-    # Conditional: approved → persist, feedback → revise, max rounds → warn
     graph.add_conditional_edges(
         "review_interrupt",
         should_revise,
@@ -184,7 +468,7 @@ def build_writer_graph() -> StateGraph:
             "warn_and_exit": "warn_and_exit",
         },
     )
-    graph.add_edge("apply_feedback", "write_resume")  # cycle back
+    graph.add_edge("apply_feedback", "write_resume")
     graph.add_edge("persist_documents", END)
     graph.add_edge("warn_and_exit", END)
 
