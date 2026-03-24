@@ -1,0 +1,39 @@
+{
+  "name": "Samuel Montalvo",
+  "contact": "Chicago, IL | 214-686-7539 | sammontalvojr@gmail.com | github.com/montal95 | linkedin.com/in/samuel-montalvo-jr | sammontalvojr.com",
+  "summary": "Backend engineer with 4+ years of production experience building and scaling APIs in regulated, high-stakes environments. Proven track record contributing to enterprise authorization systems, maintaining CI/CD pipelines, and shipping resilient APIs with PostgreSQL, Redis, and AWS. Experienced across full delivery cycles from architecture influence to production deployment. Active practitioner of AI-augmented workflows using LangChain, LangGraph, and MCP. Bilingual (English/Spanish).",
+  "sections": [
+    {
+      "heading": "Experience",
+      "bullets": [
+        "Select Rehabilitation — Application Developer | Jun 2021 – Aug 2025",
+        "Contributed to Access Manager, a centralized RBAC authorization system serving 10,000+ employees across 46 states.",
+        "Built and test-drove RESTful API endpoints with TDD using rSpec; enforced correctness across access control logic.",
+        "Served as primary developer on Direct Bill Intake, a patient-facing Rails application — end-to-end from API layer to CI/CD.",
+        "Implemented ActionMailer workflows generating secure PDF copies of intake forms, routing data via AWS SNS and S3.",
+        "Developed Hotwire-powered frontend optimized for tablet use, improving field staff efficiency.",
+        "Built Jenkins CI/CD pipeline with FactoryBot and rSpec, establishing automated validation gates for all merges.",
+        "Led bug remediation during Karefirst EMR migration from PHP/Laravel/AngularJS to Ruby on Rails.",
+        "Used Redis to cache health code lookups, reducing repeated database queries for billing reference data.",
+        "Owned deployment, hotfix, and release processes across demo-training and production environments.",
+        "Upwork — Freelance Software Developer | Jun 2021 – Oct 2025",
+        "Delivered full-stack web applications and API integrations for healthcare, e-commerce, and SaaS clients.",
+        "Built AI-augmented development workflows using LangChain, CrewAI, and MCP-connected toolchains."
+      ]
+    },
+    {
+      "heading": "Education",
+      "bullets": [
+        "Flatiron School — Full-Stack Software Development, Ruby on Rails & JavaScript | 2020",
+        "University of North Texas — B.A. in Psychology | 2012"
+      ]
+    }
+  ],
+  "skills": [
+    "Ruby on Rails", "Python", "Django", "PostgreSQL", "Redis", "AWS (EC2, S3, SNS)",
+    "Docker", "Jenkins", "GitHub Actions", "rSpec", "FactoryBot",
+    "LangChain", "LangGraph", "MCP (Model Context Protocol)",
+    "TypeScript", "JavaScript", "Node.js", "React.js", "Hotwire",
+    "Agile/Scrum", "Jira", "Datadog"
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "opening": "Dear Acme Health Engineering Team,\n\nI'm excited to apply for the Senior Software Engineer role at Acme Health. Your focus on building reliable healthcare infrastructure resonates deeply with my four years shipping production Rails applications in regulated clinical environments.",
+  "body_paragraphs": [
+    "At Select Rehabilitation, I contributed to Access Manager — a centralized RBAC authorization system serving 10,000+ employees across 46 states — and served as the primary developer on Direct Bill Intake, a patient-facing Rails application I built end-to-end from data model and API layer through Hotwire frontend and Jenkins CI/CD pipeline. Working in healthcare meant data correctness and security weren't optional; every API contract had real operational consequences.",
+    "I'm drawn to Acme Health specifically because of how your platform team approaches reliability at scale. The combination of Python/Django APIs, GitHub Actions pipelines, and AWS infrastructure aligns directly with my background, and I'm actively deepening my Python implementation skills alongside the LangChain and LangGraph work I've been building in my AI orchestration pipeline project.",
+    "I'd welcome the opportunity to discuss how my experience shipping resilient backend systems in high-stakes environments maps to the challenges your team is working on."
+  ],
+  "closing": "Thank you for your consideration.\n\nBest regards,\nSamuel Montalvo"
+}

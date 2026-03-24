@@ -1,0 +1,23 @@
+{
+  "id": "test-job-uuid-0001",
+  "source": "indeed",
+  "title": "Senior Software Engineer",
+  "company": "Acme Health",
+  "location": "Chicago, IL",
+  "source_url": "https://www.indeed.com/viewjob?jk=test0001",
+  "apply_url": "https://jobs.acmehealth.com/apply/test0001",
+  "description": "We are looking for a Senior Software Engineer to join our platform team. You will design and maintain RESTful APIs using Python and Django, build CI/CD pipelines with GitHub Actions, deploy and manage services on Kubernetes and AWS EKS, work with PostgreSQL and Redis, and collaborate with a team of 8 engineers using Agile/Scrum. Experience with Docker, Terraform, and automated testing required. Familiarity with LangChain or LLM integrations is a plus.",
+  "compensation_low": 130000,
+  "compensation_high": 160000,
+  "posted_date": "2026-03-20",
+  "workplace_type": "hybrid",
+  "fingerprint": "acme-health|senior-software-engineer|chicago-il",
+  "ats_type": "greenhouse",
+  "fit_signal": "partial",
+  "company_headcount": 250,
+  "status": "queued",
+  "discovered_at": "2026-03-24T00:00:00",
+  "resume_path": null,
+  "cover_letter_path": null,
+  "notes": null
+}

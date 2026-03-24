@@ -1,0 +1,57 @@
+Samuel Montalvo
+Chicago, IL | sammontalvojr@gmail.com | github.com/montal95
+
+PROFESSIONAL SUMMARY
+Backend engineer with 4+ years of production experience building and scaling Ruby on Rails APIs
+in regulated, high-stakes environments. Track record contributing to enterprise authorization
+systems, designing patient-facing intake applications end-to-end, and maintaining Jenkins-based
+CI/CD pipelines across PostgreSQL, Redis, and AWS-backed stacks. Active practitioner of
+AI-augmented development workflows using LangChain, CrewAI, LangGraph, and Anthropic's Model
+Context Protocol. Bilingual (English/Spanish). B.A. Psychology (University of North Texas).
+
+SKILLS & TECHNOLOGIES
+Backend: Ruby on Rails, Node.js, Express.js, Django, Hotwire, Sinatra
+Languages: Ruby, JavaScript, TypeScript, Python, SQL, HTML/CSS
+Frontend: React.js, Redux, AngularJS
+Databases: PostgreSQL, Redis, MongoDB, SQLite, Firebase
+Cloud & Infra: AWS (EC2, S3, SNS), Docker, Docker Compose, Heroku, Netlify
+CI/CD & Test: Jenkins, GitHub Actions, rSpec, FactoryBot, Mocha, Chai
+AI & Agents: LangChain, LangGraph, CrewAI, MCP (Model Context Protocol), AI agent orchestration
+
+EXPERIENCE
+
+Select Rehabilitation — Chicago, IL (Hybrid)
+Application Developer | Jun 2021 – Aug 2025
+
+Access Manager — Enterprise RBAC Authorization Platform
+- Contributed to a centralized RBAC authorization system serving 10,000+ employees across 46 states.
+- Built and test-drove RESTful API endpoints; applied TDD with rSpec to enforce correctness.
+- Stack: Ruby on Rails, PostgreSQL, rSpec.
+
+Direct Bill Intake — Patient-Facing Rails Application
+- Served as primary developer on a patient-facing intake Rails application, end-to-end.
+- Implemented ActionMailer workflows generating secure PDF copies of intake forms via AWS SNS and S3.
+- Developed Hotwire-powered frontend optimized for tablet use.
+- Built Jenkins CI/CD pipeline with FactoryBot and rSpec.
+- Stack: Ruby on Rails, Hotwire, ActionMailer, PostgreSQL, AWS SNS, S3, Jenkins.
+
+Karefirst EMR — PHP to Rails Migration
+- Led bug remediation during a full-stack migration from PHP/Laravel/AngularJS to Ruby on Rails.
+- Used Redis to cache health code lookups, reducing repeated database queries.
+- Built a Feedback feature that auto-captured browser context and created Jira tickets.
+- Owned deployment, hotfix, and release processes across demo-training and production servers.
+- Stack: Ruby on Rails, Redis, PostgreSQL, AWS S3, Jenkins.
+
+Upwork — Remote
+Freelance Software Developer | Jun 2021 – Oct 2025
+- Delivered full-stack web applications and API integrations for healthcare, e-commerce, SaaS clients.
+- Built AI-augmented development workflows using LangChain, CrewAI, and MCP-connected toolchains.
+- Designed a multi-agent job application pipeline using Claude Code CLI, Docker, and Obsidian.
+
+Mauri Pro Sailing — Frisco, TX
+Web Content Developer | Apr 2012 – Apr 2016
+- Managed content architecture and frontend development for a specialty e-commerce platform.
+
+EDUCATION
+Flatiron School — Full-Stack Software Development, Ruby on Rails & JavaScript | 2020
+University of North Texas — B.A. in Psychology | 2012
