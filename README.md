@@ -2,7 +2,7 @@
 
 A LangGraph multi-agent job application pipeline. Four agents — Discoverer, Writer, Submitter, Tracker — coordinate to automate job search, document generation, form submission, and follow-up tracking.
 
-**Status:** Phase 0 — scaffolding complete. Agents are stubbed and wired; implementation begins in Phase 1.
+**Status:** Phase 1 complete — Discoverer agent fully implemented with parallel scraper fan-out, fingerprint dedup, DB suppression of previously-seen listings, and an interrupt-based triage gate. 34/34 tests passing.
 
 ---
 
@@ -20,11 +20,16 @@ CLI input ──► [discover] ──► [write] ──► [submit]
 
 Each agent is a compiled LangGraph subgraph. The top-level graph wires them together with a shared `AsyncSqliteSaver` checkpoint store — interrupted runs resume from the last completed node.
 
-**Key LangGraph patterns used:**
-- `Send` API — parallel fan-out across job sources (Discoverer)
-- `interrupt()` — human-in-the-loop gates at triage, pre-write, review, and submission
-- Cycles — revision loop in the Writer (write → review → revise → write)
-- `AsyncSqliteSaver` — checkpoint store for resume-from-failure
+**LangGraph patterns exercised so far:**
+- `Send` API — parallel fan-out across job sources (Discoverer, Phase 1)
+- `Annotated[list, operator.add]` reducer — accumulates results from parallel branches
+- `interrupt_before` + `Command(resume)` — human-in-the-loop triage gate (Phase 1)
+- `AsyncSqliteSaver` — checkpoint store for resume-from-failure (Phase 0)
+
+**Coming next:**
+- Playwright persistent auth sessions for LinkedIn + ZipRecruiter (Phase 2)
+- Cycles — revision loop in the Writer (Phase 3)
+
 
 ---
 
@@ -33,38 +38,50 @@ Each agent is a compiled LangGraph subgraph. The top-level graph wires them toge
 **Requirements:** Python 3.11+, [uv](https://docs.astral.sh/uv/)
 
 ```bash
-# 1. Clone and install
+# 1. Clone and install (excludes playwright — not needed for Phase 1)
 git clone https://github.com/montal95/job-pipeline
 cd job-pipeline
-uv sync
+uv sync --no-install-package playwright
 
 # 2. Configure
 cp .env.example .env
 # Edit .env — set ANTHROPIC_API_KEY and CV_PATH at minimum
 
 # 3. Initialize the database
-uv run pipeline db migrate
+pipeline db migrate
 
-# 4. Run the tests (Phase 0: all graph compilation smoke tests)
-uv run pytest
-
-# 5. Try the CLI (Phase 0: stubs — no real output yet)
-uv run pipeline discover --query "rails engineer" --location "Chicago, IL"
-uv run pipeline track
+# 4. Run a discovery search
+pipeline discover --query "rails engineer" --location "Chicago, IL" --sources "indeed,dice"
 ```
+
+### Running tests
+
+Tests run via the `.venv` Python directly. `uv run` re-resolves the lockfile and
+fails on platforms where the `playwright` wheel isn't available (Linux x86_64 in CI/Docker).
+
+```bash
+# From the repo root — works on Linux/Docker and Windows
+.venv/bin/pytest tests/ -v          # Linux / Docker
+.venv\Scripts\pytest.exe tests\ -v  # Windows PowerShell (note the & prefix: & .\.venv\Scripts\pytest.exe)
+```
+
+**Current test count: 34 passing** (11 Phase 0 smoke tests + 23 Phase 1 Discoverer unit tests)
+
 
 ---
 
 ## CLI Reference
 
 ```
-pipeline discover [--query QUERY] [--location LOCATION] [--remote/--no-remote]
+pipeline discover [--query QUERY] [--location LOCATION] [--remote/--no-remote] [--sources SOURCES]
 pipeline write <job_id>
 pipeline submit <job_id>
 pipeline track
 pipeline run [--query QUERY] [--location LOCATION]
 pipeline db migrate
 ```
+
+`--sources` is a comma-separated list: `indeed,dice,linkedin,ziprecruiter`. Defaults to `indeed,dice` until Phase 2 (Playwright auth) is complete.
 
 ---
 
@@ -76,17 +93,21 @@ src/pipeline/
   state.py           # PipelineState TypedDict + all Pydantic models
   database.py        # aiosqlite connection management + migration runner
   graph.py           # Top-level graph with AsyncSqliteSaver checkpointing
-  cli.py             # typer CLI — all subcommands
+  cli.py             # typer CLI — all subcommands; interrupt/resume for discover
   agents/
-    discoverer.py    # Search, dedup, triage interrupt
-    writer.py        # CV → tailored resume + cover letter (with revision loop)
-    submitter.py     # ATS form fill + hard submission gate
-    tracker.py       # Status dashboard, follow-up scheduling
+    discoverer.py    # ✅ Phase 1: httpx scrapers, Send fan-out, dedup, triage interrupt
+    writer.py        # 🔜 Phase 3: CV → tailored resume + cover letter (revision loop)
+    submitter.py     # 🔜 Phase 4: ATS form fill + hard submission gate
+    tracker.py       # 🔜 Phase 5: Status dashboard, follow-up scheduling
 migrations/
   001_initial.sql    # jobs, submissions, search_runs, company_cache tables
 tests/
-  test_phase0.py     # Graph compilation + state schema smoke tests
+  fixtures/
+    sample_jobs.py   # Synthetic cross-source fixtures for Discoverer tests
+  test_phase0.py     # Graph compilation + state schema smoke tests (11 tests)
+  test_phase1.py     # Discoverer unit tests — fingerprint, dedup, ATS, Send (23 tests)
 ```
+
 
 ---
 
@@ -95,27 +116,61 @@ tests/
 | Phase | Scope | Status |
 |-------|-------|--------|
 | 0 | Scaffolding, state schema, DB, stub graphs, CLI | ✅ Complete |
-| 1 | Discoverer — httpx scrapers, Send API fan-out, triage interrupt | 🔜 Next |
-| 2 | Playwright auth sessions (LinkedIn, ZipRecruiter) | ⬜ |
+| 1 | Discoverer — httpx scrapers, Send API fan-out, triage interrupt, persist to DB | ✅ Complete |
+| 2 | Playwright auth sessions (LinkedIn, ZipRecruiter) | 🔜 Next |
 | 3 | Writer — LLM calls, python-docx rendering, revision loop | ⬜ |
 | 4 | Submitter — ATS strategies, Playwright form fill | ⬜ |
 | 5 | Tracker — rich dashboard, follow-up scheduling | ⬜ |
-| 6 | Polish, README architecture diagram, blog post | ⬜ |
+| 6 | Polish, Mermaid architecture diagram, blog post | ⬜ |
+
+---
+
+## Discoverer — what Phase 1 built
+
+The Discoverer agent runs all job sources in parallel using LangGraph's `Send` API,
+merges and deduplicates results by fingerprint, cross-references the DB to suppress
+already-seen listings, then pauses for user triage before persisting approved jobs.
+
+```
+parse_search_params
+      │
+fan_out_sources ──(Send)──► scrape_indeed       ──┐
+                ──(Send)──► scrape_dice         ──┤
+                ──(Send)──► scrape_linkedin*    ──┤──► merge_results
+                ──(Send)──► scrape_ziprecruiter*──┘         │
+                                                      triage_interrupt  ← user reviews shortlist
+                                                            │
+                                                       persist_to_db
+```
+
+\* Phase 2 stubs — require Playwright auth sessions.
+
+**Dedup logic:** listings are fingerprinted by `sha256(company|title|location)[:16]`.
+Cross-source duplicates (same role posted on Indeed and Dice) are collapsed to one entry.
+Previously skipped, applied, or submitted listings are suppressed silently on re-discovery.
+
+**Triage gate:** the graph checkpoints at `triage_interrupt`. The CLI renders a Rich table,
+collects per-listing `a`/`s` decisions, then resumes with `Command(resume=decisions)`.
+If the terminal is closed mid-triage, re-running the same `thread_id` restores state
+from the checkpoint and re-presents the list.
 
 ---
 
 ## Token minimization strategy
 
 LLM tokens are reserved for judgment tasks only:
-- ✅ Resume tailoring (LLM)
-- ✅ Cover letter writing (LLM)  
-- ✅ Fit assessment — optional (LLM)
-- ❌ Job listing fetch → httpx scraper
-- ❌ JD field parsing → regex + BS4
-- ❌ Company research → httpx + search scraper, cached
-- ❌ Dedup → fingerprint hash
-- ❌ Document rendering → python-docx from structured JSON
-- ❌ ATS fingerprinting → URL pattern matching
-- ❌ Form filling → Playwright + field maps
+
+| Step | Approach | LLM? |
+|------|----------|-------|
+| Job listing fetch | httpx scraper | ❌ |
+| JD field parsing | regex + BS4 | ❌ |
+| Company research | httpx + search scraper, cached in DB | ❌ |
+| Dedup | fingerprint hash | ❌ |
+| ATS fingerprinting | URL pattern matching | ❌ |
+| Form filling | Playwright + field maps | ❌ |
+| Document rendering | python-docx from structured JSON | ❌ |
+| **Fit assessment** | **one-sentence judgment** | ✅ optional |
+| **Resume tailoring** | **structured JSON output** | ✅ |
+| **Cover letter** | **full text generation** | ✅ |
 
 Target: 2–3 LLM calls per application.
