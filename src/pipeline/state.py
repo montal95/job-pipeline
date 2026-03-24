@@ -172,6 +172,9 @@ class PipelineState(TypedDict):
     # Submission
     submission_status: SubmissionStatus | None
     submission_url: str | None
+    needs_file_upload: bool          # set by scan_form; drives conditional render node
+    ats_field_map: dict[str, str]    # label → CSS selector, set by scan_form
+    submission_confirmed: bool       # set by capture_confirmation
 
     # Human-in-the-loop signals
     human_approved: bool
@@ -200,6 +203,9 @@ def empty_state() -> PipelineState:
         revision_round=0,
         submission_status=None,
         submission_url=None,
+        needs_file_upload=False,
+        ats_field_map={},
+        submission_confirmed=False,
         human_approved=False,
         human_feedback=None,
         errors=[],
