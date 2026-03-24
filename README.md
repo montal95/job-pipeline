@@ -2,7 +2,7 @@
 
 A LangGraph multi-agent job application pipeline. Four agents — Discoverer, Writer, Submitter, Tracker — coordinate to automate job search, document generation, form submission, and follow-up tracking.
 
-**Status:** Phase 2 complete — All four job sources active. LinkedIn and ZipRecruiter scrapers use Playwright `storage_state` auth. Stale session detection with actionable re-run instructions. 51/51 tests passing.
+**Status:** Phase 3 complete — Writer agent fully implemented. CV loading, gap analysis, LLM-driven resume + cover letter generation, python-docx rendering, and a human-in-the-loop revision loop. 82/82 tests passing.
 
 ---
 
@@ -25,9 +25,12 @@ Each agent is a compiled LangGraph subgraph. The top-level graph wires them toge
 - `Annotated[list, operator.add]` reducer — accumulates results from parallel branches
 - `interrupt_before` + `Command(resume)` — human-in-the-loop triage gate (Phase 1)
 - `AsyncSqliteSaver` — checkpoint store for resume-from-failure (Phase 0)
+- `interrupt()` at multiple gates — pre-write interview + document review (Phase 3)
+- **Cycle / revision loop** — `apply_feedback → write_resume` loops back until approved or max rounds hit (Phase 3)
+- `add_conditional_edges` with routing function — `should_revise` branches to approve / revise / warn (Phase 3)
 
 **Coming next:**
-- Writer agent — LLM calls, python-docx rendering, revision loop (Phase 3)
+- Submitter agent — ATS fingerprinting, Playwright form fill, hard submission gate (Phase 4)
 
 
 ---
@@ -71,7 +74,7 @@ fails on platforms where the `playwright` wheel isn't available (Linux x86_64 in
 .venv\Scripts\pytest.exe tests\ -v  # Windows PowerShell (note the & prefix: & .\.venv\Scripts\pytest.exe)
 ```
 
-**Current test count: 51 passing** (11 Phase 0 + 23 Phase 1 + 17 Phase 2)
+**Current test count: 82 passing** (11 Phase 0 + 23 Phase 1 + 17 Phase 2 + 13 config CLI + 18 Phase 3)
 
 
 ---
@@ -104,7 +107,7 @@ src/pipeline/
   cli.py             # typer CLI — all subcommands; interrupt/resume for discover
   agents/
     discoverer.py    # ✅ Phase 1+2: httpx scrapers, Playwright auth, Send fan-out, triage
-    writer.py        # 🔜 Phase 3: CV → tailored resume + cover letter (revision loop)
+    writer.py        # ✅ Phase 3: CV → tailored resume + cover letter (revision loop, 2 interrupt gates)
     submitter.py     # 🔜 Phase 4: ATS form fill + hard submission gate
     tracker.py       # 🔜 Phase 5: Status dashboard, follow-up scheduling
 migrations/
@@ -116,11 +119,18 @@ tests/
     sample_jobs.py              # Synthetic cross-source fixtures (Phase 1)
     linkedin_job_cards.html     # Minimal LinkedIn card DOM (Phase 2)
     ziprecruiter_job_cards.html # Minimal ZipRecruiter card DOM (Phase 2)
+    sample_cv.txt               # Synthetic CV text for Writer tests (Phase 3)
+    sample_job.json             # Complete JobListing JSON fixture (Phase 3)
+    sample_resume_llm_response.json       # Realistic LLM resume JSON (Phase 3)
+    sample_cover_letter_llm_response.json # Realistic LLM cover letter JSON (Phase 3)
   test_phase0.py     # Graph compilation + state schema smoke tests (11 tests)
   test_phase1.py     # Discoverer unit tests — fingerprint, dedup, ATS, Send (23 tests)
   test_phase2.py     # Auth helpers, card parsers, scraper node behavior (17 tests)
+  test_phase3.py     # Writer unit tests — CV loading, gap extraction, prompts, docx, nodes (18 tests)
+  test_config_cli.py # Config set/read helpers (13 tests)
 docs/
   phase2-handoff.md  # Commit plan and architecture decisions for Phase 2
+  phase3-handoff.md  # Commit plan and architecture decisions for Phase 3
 ```
 
 
@@ -133,8 +143,8 @@ docs/
 | 0 | Scaffolding, state schema, DB, stub graphs, CLI | ✅ Complete |
 | 1 | Discoverer — httpx scrapers, Send API fan-out, triage interrupt, persist to DB | ✅ Complete |
 | 2 | Playwright auth sessions (LinkedIn, ZipRecruiter), save_auth.py helper | ✅ Complete |
-| 3 | Writer — LLM calls, python-docx rendering, revision loop | 🔜 Next |
-| 4 | Submitter — ATS strategies, Playwright form fill | ⬜ |
+| 3 | Writer — LLM calls, python-docx rendering, revision loop | ✅ Complete |
+| 4 | Submitter — ATS strategies, Playwright form fill | 🔜 Next |
 | 5 | Tracker — rich dashboard, follow-up scheduling | ⬜ |
 | 6 | Polish, Mermaid architecture diagram, blog post | ⬜ |
 
@@ -168,6 +178,57 @@ Previously skipped, applied, or submitted listings are suppressed silently on re
 collects per-listing `a`/`s` decisions, then resumes with `Command(resume=decisions)`.
 If the terminal is closed mid-triage, re-running the same `thread_id` restores state
 from the checkpoint and re-presents the list.
+
+## Writer — what Phase 3 built
+
+The Writer agent takes a job DB record plus the user's CV and produces two `.docx` files:
+a tailored resume and a cover letter. It exercises the most complex LangGraph topology in
+the pipeline — two interrupt gates and a cycle.
+
+```
+load_job → fetch_cv → research_company → pre_write_interview (interrupt)
+                                                   │
+                                          write_resume (LLM)
+                                                   │
+                                        write_cover_letter (LLM)
+                                                   │
+                                          review_interrupt (interrupt)
+                                                   │
+                        ┌──────────────────────────┤
+                   approved                   feedback given
+                        │                          │
+                persist_documents          apply_feedback (LLM)
+                        │                          │
+                       END              ────► write_resume (cycle)
+                                         (max 3 rounds, then warn_and_exit)
+```
+
+**Key implementation decisions:**
+
+**Structured JSON output, not free-form text.** The LLM returns a typed JSON object
+(`ResumeContent` / `CoverLetterContent`) that is validated by Pydantic before being
+passed to the deterministic `python-docx` renderer. This separates generation from
+presentation — revision rounds only re-call the LLM, not the renderer.
+
+**Two interrupt gates.** `pre_write_interview` surfaces gap keywords extracted from the
+JD against the CV and asks targeted questions before generation begins. `review_interrupt`
+shows the generated doc paths and waits for explicit approval, feedback text, or abort.
+Both are proper LangGraph `interrupt()` calls — the state is checkpointed at the boundary,
+so a closed terminal can resume the next day via `pipeline write <job_id>`.
+
+**Revision cycle.** `should_revise` routes `review_interrupt` output to one of three
+branches: `persist_documents` (approved), `apply_feedback` (feedback present + rounds
+remain), or `warn_and_exit` (max rounds exceeded). The `apply_feedback → write_resume`
+back-edge is the cycle. `apply_feedback` passes the previous resume JSON plus feedback
+as a targeted revision prompt — cheaper and more accurate than full regeneration.
+
+**Zero-token setup.** `load_job` reads from SQLite. `fetch_cv` reads from disk (cached
+in state after first call). `research_company` checks `company_cache` first; falls back
+to a DuckDuckGo Instant Answer API call and writes the result back to the cache.
+
+**Hyperlinks in python-docx.** Like the npm `docx` library, `python-docx` doesn't
+natively support hyperlink runs. The workaround uses OOXML relationship + element
+construction directly via `docx.oxml`.
 
 ---
 
