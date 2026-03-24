@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head><title>Apply - Workday</title></head>
+<body>
+<div data-automation-id="wd-ApplicationPage">
+  <h1>Senior Software Engineer</h1>
+
+  <!-- Workday uses aria-label attributes for field identification -->
+  <div class="wd-field">
+    <input aria-label="First Name" data-automation-id="firstName" type="text">
+  </div>
+
+  <div class="wd-field">
+    <input aria-label="Last Name" data-automation-id="lastName" type="text">
+  </div>
+
+  <div class="wd-field">
+    <input aria-label="Email Address" data-automation-id="email" type="email">
+  </div>
+
+  <div class="wd-field">
+    <input aria-label="Phone Number" data-automation-id="phone" type="tel">
+  </div>
+
+  <div class="wd-field">
+    <input aria-label="LinkedIn URL" data-automation-id="linkedinUrl" type="text">
+  </div>
+
+  <!-- Workday uses a separate resume parser UI — no standard file input -->
+
+  <button data-automation-id="bottom-navigation-next-button">Next</button>
+</div>
+</body>
+</html>

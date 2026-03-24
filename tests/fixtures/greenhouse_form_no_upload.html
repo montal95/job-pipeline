@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head><title>Apply - Acme Health</title></head>
+<body>
+<h1>Application for Senior Software Engineer</h1>
+<form id="application_form" action="/apply" method="post">
+
+  <div class="field">
+    <label for="first_name">First Name</label>
+    <input type="text" id="first_name" name="first_name" required>
+  </div>
+
+  <div class="field">
+    <label for="last_name">Last Name</label>
+    <input type="text" id="last_name" name="last_name" required>
+  </div>
+
+  <div class="field">
+    <label for="email">Email Address</label>
+    <input type="email" id="email" name="email" required>
+  </div>
+
+  <div class="field">
+    <label for="phone">Phone</label>
+    <input type="tel" id="phone" name="phone">
+  </div>
+
+  <div class="field">
+    <label for="linkedin_url">LinkedIn Profile URL</label>
+    <input type="text" id="linkedin_url" name="linkedin_url">
+  </div>
+
+  <!-- No <input type="file"> elements in this variant -->
+
+  <button type="submit">Submit Application</button>
+</form>
+</body>
+</html>
