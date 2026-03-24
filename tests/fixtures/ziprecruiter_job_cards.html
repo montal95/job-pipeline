@@ -1,0 +1,46 @@
+<!--
+  Minimal ZipRecruiter job search results page fixture.
+  Reflects the DOM structure of ziprecruiter.com/jobs-search as of early 2026.
+  Three cards: two complete with salary, one without.
+  Used by test_parse_ziprecruiter_cards_* tests — no live browser required.
+-->
+<html>
+<body>
+  <div class="job_results">
+
+    <article class="job_result" data-job-id="zr-001">
+      <h2 class="job_title">
+        <a class="job_link" href="/c/Acme-Health/j/Senior-Rails-Engineer/?lvk=zr001">
+          Senior Rails Engineer
+        </a>
+      </h2>
+      <a class="company_name" href="/c/Acme-Health">Acme Health</a>
+      <span class="location">Chicago, IL</span>
+      <span class="compensation">$140,000 - $170,000/yr</span>
+    </article>
+
+    <article class="job_result" data-job-id="zr-002">
+      <h2 class="job_title">
+        <a class="job_link" href="/c/DataCo/j/AI-Engineer/?lvk=zr002">
+          AI Engineer
+        </a>
+      </h2>
+      <a class="company_name" href="/c/DataCo">DataCo</a>
+      <span class="location">Remote</span>
+      <span class="compensation">$160,000 - $200,000/yr</span>
+    </article>
+
+    <article class="job_result" data-job-id="zr-003">
+      <h2 class="job_title">
+        <a class="job_link" href="/c/HealthTech/j/Backend-Engineer/?lvk=zr003">
+          Backend Engineer
+        </a>
+      </h2>
+      <a class="company_name" href="/c/HealthTech">HealthTech Co</a>
+      <span class="location">Chicago, IL (Hybrid)</span>
+      <!-- compensation intentionally absent -->
+    </article>
+
+  </div>
+</body>
+</html>
