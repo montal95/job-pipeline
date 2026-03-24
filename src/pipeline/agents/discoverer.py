@@ -1,21 +1,24 @@
 """
-Discoverer Agent — Phase 1 implementation.
+Discoverer Agent — Phase 2 implementation.
 
 Responsibility:
-  Search Indeed and Dice (no-auth), deduplicate by fingerprint, cross-
-  reference the DB to suppress already-seen listings, present a triage
-  shortlist to the user, and persist approved listings to the jobs table.
+  Search Indeed, Dice (no-auth), LinkedIn, and ZipRecruiter (Playwright
+  storage_state auth), deduplicate by fingerprint, cross-reference the DB
+  to suppress already-seen listings, present a triage shortlist to the user,
+  and persist approved listings to the jobs table.
 
 LangGraph patterns exercised here:
-  - Send API (via add_conditional_edges + route_to_scrapers) for parallel
-    fan-out across job sources. Each scraper runs concurrently; their
-    raw_results are accumulated via the operator.add reducer on PipelineState.
+  - Send API (via add_conditional_edges) for parallel fan-out across sources.
+    Each scraper runs concurrently; raw_results are accumulated via the
+    operator.add reducer on PipelineState.
   - interrupt() for the triage human-in-the-loop gate. The graph checkpoints
     at this boundary; the CLI resumes via Command(resume=decisions).
 
-Phase 2 targets (stubs in this file):
-  - scrape_linkedin  — Playwright + persistent browser profile
-  - scrape_ziprecruiter — Playwright + persistent browser profile
+Playwright scrapers (LinkedIn, ZipRecruiter):
+  - Run on Windows only (no Linux x86_64 wheel available).
+  - Require a saved auth session at playwright/.auth/{platform}.json.
+  - Generate the auth file once with: python scripts/save_auth.py --platform all
+  - Detect missing auth file and stale sessions — warn and return [] gracefully.
 """
 
 from __future__ import annotations
@@ -23,7 +26,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import quote_plus
 from uuid import uuid4
 
@@ -45,11 +50,16 @@ from pipeline.state import (
     WorkplaceType,
 )
 
+# async_playwright is optional — only available on Windows (sys_platform == 'win32').
+# Imported at module level so tests can monkeypatch it without entering the try block.
+try:
+    from playwright.async_api import async_playwright
+except ImportError:
+    async_playwright = None  # type: ignore[assignment]
+
 console = Console()
 
 # ── HTTP headers ───────────────────────────────────────────────────────────────
-# Realistic browser headers reduce 403 rate on public job boards.
-# Indeed still blocks aggressively; graceful fallback is built in.
 
 HEADERS = {
     "User-Agent": (
@@ -74,9 +84,20 @@ ATS_PATTERNS: dict[str, list[str]] = {
     "linkedin": ["linkedin.com/jobs"],
 }
 
+# ── Auth paths ─────────────────────────────────────────────────────────────────
+
+AUTH_DIR = Path(__file__).parent.parent.parent.parent / "playwright" / ".auth"
+
+LOGIN_PATTERNS: dict[str, list[str]] = {
+    "linkedin": ["/login", "/checkpoint"],
+    "ziprecruiter": ["/login", "/signin"],
+}
+
+
+# ── Pure helper functions ──────────────────────────────────────────────────────
+
 
 def _detect_ats(url: str | None) -> AtsType:
-    """Fingerprint an apply URL to determine the ATS type."""
     if not url:
         return AtsType.UNKNOWN
     url_lower = url.lower()
@@ -93,56 +114,122 @@ def _make_fingerprint(company: str, title: str, location: str) -> str:
 
 
 def _parse_compensation(text: str) -> tuple[int | None, int | None]:
-    """
-    Extract annualized salary range from a string like '$120K - $160K/yr'
-    or '$60/hr'. Returns (low, high) in whole dollars. Returns (None, None)
-    if no salary pattern is found.
-    """
     text = text.replace(",", "")
-    # Hourly: $45/hr → annualize at 2080 hrs/yr
     hourly = re.search(r"\$(\d+(?:\.\d+)?)\s*/\s*hr", text, re.IGNORECASE)
     if hourly:
         rate = float(hourly.group(1))
         return int(rate * 2080), int(rate * 2080)
-    # Range with K: $120K - $160K
     range_k = re.findall(r"\$(\d+(?:\.\d+)?)K", text, re.IGNORECASE)
     if len(range_k) >= 2:
         return int(float(range_k[0]) * 1000), int(float(range_k[1]) * 1000)
     if len(range_k) == 1:
         val = int(float(range_k[0]) * 1000)
         return val, val
-    # Plain range: $120000 - $160000
     range_plain = re.findall(r"\$(\d{5,6})", text)
     if len(range_plain) >= 2:
         return int(range_plain[0]), int(range_plain[1])
     return None, None
 
 
-# ── Indeed scraper ─────────────────────────────────────────────────────────────
+def _get_auth_path(platform: str) -> Path:
+    """Return the storage_state auth file path for a given platform."""
+    return AUTH_DIR / f"{platform}.json"
+
+
+def _is_login_redirect(url: str, platform: str) -> bool:
+    """Return True if the current URL indicates a login redirect."""
+    patterns = LOGIN_PATTERNS.get(platform, ["/login"])
+    return any(p in url for p in patterns)
+
+
+def _parse_linkedin_cards(html: str) -> list[RawJobListing]:
+    """
+    Parse LinkedIn job search results HTML into RawJobListing objects.
+    Pure function — no browser dependency, fully unit testable.
+    Skips cards missing a title or company element.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    results: list[RawJobListing] = []
+    for card in soup.select("div.job-search-card"):
+        title_el = card.select_one("h3.base-search-card__title")
+        company_el = card.select_one("h4.base-search-card__subtitle")
+        location_el = card.select_one("span.job-search-card__location")
+        link_el = card.select_one("a.base-card__full-link")
+        salary_el = card.select_one("span.job-search-card__salary-info")
+        if not (title_el and company_el):
+            continue
+        title = title_el.get_text(strip=True)
+        company = company_el.get_text(strip=True)
+        location = location_el.get_text(strip=True) if location_el else ""
+        href = link_el.get("href", "") if link_el else ""
+        source_url = f"https://www.linkedin.com{href}" if href.startswith("/") else href
+        comp_low, comp_high = _parse_compensation(
+            salary_el.get_text(strip=True) if salary_el else ""
+        )
+        workplace = WorkplaceType.REMOTE if "remote" in location.lower() else None
+        results.append(RawJobListing(
+            source="linkedin",
+            title=title,
+            company=company,
+            location=location,
+            source_url=source_url,
+            compensation_low=comp_low,
+            compensation_high=comp_high,
+            workplace_type=workplace,
+        ))
+    return results
+
+
+def _parse_ziprecruiter_cards(html: str) -> list[RawJobListing]:
+    """
+    Parse ZipRecruiter job search results HTML into RawJobListing objects.
+    Pure function — no browser dependency, fully unit testable.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    results: list[RawJobListing] = []
+    for card in soup.select("article.job_result"):
+        title_el = card.select_one("h2.job_title a.job_link")
+        company_el = card.select_one("a.company_name")
+        location_el = card.select_one("span.location")
+        salary_el = card.select_one("span.compensation")
+        if not (title_el and company_el):
+            continue
+        title = title_el.get_text(strip=True)
+        company = company_el.get_text(strip=True)
+        location = location_el.get_text(strip=True) if location_el else ""
+        href = title_el.get("href", "")
+        source_url = (
+            f"https://www.ziprecruiter.com{href}" if href.startswith("/") else href
+        )
+        comp_low, comp_high = _parse_compensation(
+            salary_el.get_text(strip=True) if salary_el else ""
+        )
+        loc_lower = location.lower()
+        workplace = (
+            WorkplaceType.REMOTE if "remote" in loc_lower
+            else WorkplaceType.HYBRID if "hybrid" in loc_lower
+            else None
+        )
+        results.append(RawJobListing(
+            source="ziprecruiter",
+            title=title,
+            company=company,
+            location=location.replace("(Remote)", "").replace("(Hybrid)", "").strip(),
+            source_url=source_url,
+            compensation_low=comp_low,
+            compensation_high=comp_high,
+            workplace_type=workplace,
+        ))
+    return results
+
+
+# ── Indeed scraper (httpx + BS4, no auth) ─────────────────────────────────────
 
 
 async def scrape_indeed(state: PipelineState) -> dict:
-    """
-    Scrape Indeed job search results using httpx + BeautifulSoup.
-
-    Indeed's public search endpoint is:
-      https://www.indeed.com/jobs?q={query}&l={location}&sort=date&limit=25
-
-    HTML structure targeted:
-      - Job cards: <div class="job_seen_beacon"> or <li class="css-...">
-      - Title: <span title="..."> inside <h2 class="jobTitle">
-      - Company: <span class="companyName">
-      - Location: <div class="companyLocation">
-      - Salary: <div class="metadata salary-snippet-container">
-      - Job link: <a id="job_..."> href attribute
-
-    Indeed blocks scrapers aggressively. On 403/429 we log a warning and
-    return empty results rather than crashing the pipeline.
-    """
+    """Scrape Indeed via httpx + BS4. Gracefully handles 403/429."""
     params = state["search_params"]
-    query_str = params.query
-    if params.remote:
-        query_str += " remote"
+    query_str = params.query + (" remote" if params.remote else "")
     url = (
         f"https://www.indeed.com/jobs"
         f"?q={quote_plus(query_str)}"
@@ -154,7 +241,7 @@ async def scrape_indeed(state: PipelineState) -> dict:
         async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=15) as client:
             resp = await client.get(url)
         if resp.status_code in (403, 429):
-            console.print(f"[yellow]⚠ Indeed blocked scrape (HTTP {resp.status_code}) — skipping[/yellow]")
+            console.print(f"[yellow]⚠ Indeed blocked (HTTP {resp.status_code}) — skipping[/yellow]")
             return {"raw_results": []}
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -164,7 +251,7 @@ async def scrape_indeed(state: PipelineState) -> dict:
             company_el = card.select_one("span.companyName, [data-testid='company-name']")
             location_el = card.select_one("div.companyLocation, [data-testid='text-location']")
             link_el = card.select_one("a[id^='job_'], a.jcs-JobTitle, h2.jobTitle a")
-            salary_el = card.select_one("div.metadata.salary-snippet-container, div.salaryOnly")
+            salary_el = card.select_one("div.metadata.salary-snippet-container")
             if not (title_el and company_el):
                 continue
             title = title_el.get("title") or title_el.get_text(strip=True)
@@ -172,18 +259,14 @@ async def scrape_indeed(state: PipelineState) -> dict:
             location = location_el.get_text(strip=True) if location_el else params.location
             href = link_el.get("href", "") if link_el else ""
             source_url = f"https://www.indeed.com{href}" if href.startswith("/") else href
-            salary_text = salary_el.get_text(strip=True) if salary_el else ""
-            comp_low, comp_high = _parse_compensation(salary_text)
-            workplace = WorkplaceType.REMOTE if "remote" in location.lower() else None
+            comp_low, comp_high = _parse_compensation(
+                salary_el.get_text(strip=True) if salary_el else ""
+            )
             results.append(RawJobListing(
-                source="indeed",
-                title=title,
-                company=company,
-                location=location,
-                source_url=source_url or url,
-                compensation_low=comp_low,
+                source="indeed", title=title, company=company, location=location,
+                source_url=source_url or url, compensation_low=comp_low,
                 compensation_high=comp_high,
-                workplace_type=workplace,
+                workplace_type=WorkplaceType.REMOTE if "remote" in location.lower() else None,
             ))
     except Exception as exc:
         console.print(f"[yellow]⚠ Indeed scrape error: {exc}[/yellow]")
@@ -191,29 +274,18 @@ async def scrape_indeed(state: PipelineState) -> dict:
     return {"raw_results": results}
 
 
-# ── Dice scraper ───────────────────────────────────────────────────────────────
+# ── Dice scraper (JSON API, no auth) ──────────────────────────────────────────
 
 
 async def scrape_dice(state: PipelineState) -> dict:
-    """
-    Scrape Dice job search results using httpx + BeautifulSoup.
-
-    Dice provides a JSON-backed search API at:
-      https://job-search-api.svc.dhigroupinc.com/v1/dice/jobs/search
-      ?q={query}&location={location}&countryCode=US&radius=30&radiusUnit=mi
-      &page=1&pageSize=20&filters.postedDate=ONE_WEEK&language=en
-
-    This is the API the Dice frontend calls; it's stable and returns
-    structured JSON, making it more reliable than HTML scraping.
-    """
+    """Scrape Dice via their JSON search API. More stable than HTML parsing."""
     params = state["search_params"]
     api_url = (
         "https://job-search-api.svc.dhigroupinc.com/v1/dice/jobs/search"
         f"?q={quote_plus(params.query)}"
         f"&location={quote_plus(params.location)}"
         f"&countryCode=US&radius=30&radiusUnit=mi"
-        f"&page=1&pageSize={params.max_results_per_source}"
-        f"&language=en"
+        f"&page=1&pageSize={params.max_results_per_source}&language=en"
     )
     results: list[RawJobListing] = []
     try:
@@ -223,37 +295,24 @@ async def scrape_dice(state: PipelineState) -> dict:
             console.print(f"[yellow]⚠ Dice blocked (HTTP {resp.status_code}) — skipping[/yellow]")
             return {"raw_results": []}
         resp.raise_for_status()
-        data = resp.json()
-        for job in data.get("data", []):
-            location_obj = job.get("location", {})
-            location_str = (
-                f"{location_obj.get('city', '')}, {location_obj.get('state', '')}".strip(", ")
-                or params.location
-            )
+        for job in resp.json().get("data", []):
+            loc_obj = job.get("location", {})
+            location = f"{loc_obj.get('city','')}, {loc_obj.get('state','')}".strip(", ") or params.location
             apply_url = job.get("applyUrl") or job.get("externalApplyLink")
-            comp_low, comp_high = _parse_compensation(
-                job.get("salaryRange", "") or job.get("compensationRange", "") or ""
-            )
-            workplace_str = (job.get("workplaceTypes") or [""])[0].lower()
+            comp_low, comp_high = _parse_compensation(job.get("salaryRange", "") or "")
+            ws = (job.get("workplaceTypes") or [""])[0].lower()
             workplace = (
-                WorkplaceType.REMOTE if "remote" in workplace_str
-                else WorkplaceType.HYBRID if "hybrid" in workplace_str
-                else WorkplaceType.ONSITE if "onsite" in workplace_str or "on-site" in workplace_str
-                else None
+                WorkplaceType.REMOTE if "remote" in ws else
+                WorkplaceType.HYBRID if "hybrid" in ws else
+                WorkplaceType.ONSITE if "onsite" in ws else None
             )
             job_id = job.get("id", "")
-            source_url = f"https://www.dice.com/job-detail/{job_id}" if job_id else api_url
             results.append(RawJobListing(
-                source="dice",
-                title=job.get("title", "Unknown"),
-                company=job.get("companyPageUrl", job.get("advertiserName", "Unknown")),
-                location=location_str,
-                source_url=source_url,
-                apply_url=apply_url,
-                description=job.get("jobDescription"),
-                compensation_low=comp_low,
-                compensation_high=comp_high,
-                workplace_type=workplace,
+                source="dice", title=job.get("title", "Unknown"),
+                company=job.get("advertiserName", "Unknown"), location=location,
+                source_url=f"https://www.dice.com/job-detail/{job_id}" if job_id else api_url,
+                apply_url=apply_url, description=job.get("jobDescription"),
+                compensation_low=comp_low, compensation_high=comp_high, workplace_type=workplace,
             ))
     except Exception as exc:
         console.print(f"[yellow]⚠ Dice scrape error: {exc}[/yellow]")
@@ -261,28 +320,101 @@ async def scrape_dice(state: PipelineState) -> dict:
     return {"raw_results": results}
 
 
-# ── Phase 2 stubs (Playwright / auth required) ────────────────────────────────
+# ── LinkedIn scraper (Playwright + storage_state) ─────────────────────────────
 
 
 async def scrape_linkedin(state: PipelineState) -> dict:
     """
-    Playwright scraper for LinkedIn. Requires persistent auth session.
-    Phase 2 target — see research backlog in PRD for storage_state approach.
+    Scrape LinkedIn job search via Playwright with a saved auth session.
+    Windows only. Requires playwright/.auth/linkedin.json from save_auth.py.
     """
-    console.print("[dim]LinkedIn scraper: Phase 2 stub — skipping[/dim]")
-    return {"raw_results": []}
+    auth_path = _get_auth_path("linkedin")
+    if not auth_path.exists():
+        console.print(
+            "[yellow]⚠ LinkedIn auth file not found. "
+            "Run: python scripts/save_auth.py --platform linkedin[/yellow]"
+        )
+        return {"raw_results": []}
+
+    params = state["search_params"]
+    search_url = (
+        "https://www.linkedin.com/jobs/search/"
+        f"?keywords={quote_plus(params.query)}"
+        f"&location={quote_plus(params.location)}"
+        "&sortBy=DD"
+        + ("&f_WT=2" if params.remote else "")
+    )
+    results: list[RawJobListing] = []
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, channel="chrome")
+            context = await browser.new_context(storage_state=str(auth_path))
+            page = await context.new_page()
+            await page.goto(search_url, wait_until="domcontentloaded")
+            await page.wait_for_selector("div.job-search-card, ul.jobs-search__results-list", timeout=10000)
+            if _is_login_redirect(page.url, "linkedin"):
+                console.print(
+                    "[yellow]⚠ LinkedIn session expired. "
+                    "Run: python scripts/save_auth.py --platform linkedin[/yellow]"
+                )
+                await browser.close()
+                return {"raw_results": []}
+            html = await page.content()
+            await browser.close()
+        results = _parse_linkedin_cards(html)
+    except Exception as exc:
+        console.print(f"[yellow]⚠ LinkedIn scrape error: {exc}[/yellow]")
+    console.print(f"[dim]LinkedIn: {len(results)} listings[/dim]")
+    return {"raw_results": results}
+
+
+# ── ZipRecruiter scraper (Playwright + storage_state) ────────────────────────
 
 
 async def scrape_ziprecruiter(state: PipelineState) -> dict:
     """
-    Playwright scraper for ZipRecruiter. Requires persistent auth session.
-    Phase 2 target — see research backlog in PRD for storage_state approach.
+    Scrape ZipRecruiter job search via Playwright with a saved auth session.
+    Windows only. Requires playwright/.auth/ziprecruiter.json from save_auth.py.
     """
-    console.print("[dim]ZipRecruiter scraper: Phase 2 stub — skipping[/dim]")
-    return {"raw_results": []}
+    auth_path = _get_auth_path("ziprecruiter")
+    if not auth_path.exists():
+        console.print(
+            "[yellow]⚠ ZipRecruiter auth file not found. "
+            "Run: python scripts/save_auth.py --platform ziprecruiter[/yellow]"
+        )
+        return {"raw_results": []}
+
+    params = state["search_params"]
+    search_url = (
+        "https://www.ziprecruiter.com/jobs-search"
+        f"?search={quote_plus(params.query)}"
+        f"&location={quote_plus(params.location)}"
+    )
+    results: list[RawJobListing] = []
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, channel="chrome")
+            context = await browser.new_context(storage_state=str(auth_path))
+            page = await context.new_page()
+            await page.goto(search_url, wait_until="domcontentloaded")
+            await page.wait_for_selector("article.job_result", timeout=10000)
+            if _is_login_redirect(page.url, "ziprecruiter"):
+                console.print(
+                    "[yellow]⚠ ZipRecruiter session expired. "
+                    "Run: python scripts/save_auth.py --platform ziprecruiter[/yellow]"
+                )
+                await browser.close()
+                return {"raw_results": []}
+            html = await page.content()
+            await browser.close()
+        results = _parse_ziprecruiter_cards(html)
+    except Exception as exc:
+        console.print(f"[yellow]⚠ ZipRecruiter scrape error: {exc}[/yellow]")
+    console.print(f"[dim]ZipRecruiter: {len(results)} listings[/dim]")
+    return {"raw_results": results}
 
 
-# ── Routing node (Send API fan-out) ───────────────────────────────────────────
+# ── Graph nodes ────────────────────────────────────────────────────────────────
 
 
 SOURCE_NODE_MAP = {
@@ -294,143 +426,97 @@ SOURCE_NODE_MAP = {
 
 
 def parse_search_params(state: PipelineState) -> dict:
-    """
-    Validate search_params are present and non-empty.
-    Adds a warning if no sources are configured; the graph can still run
-    (merge_results will receive empty raw_results and shortlist accordingly).
-    """
-    params = state["search_params"]
+    """Validate search_params. Warn if no sources configured."""
     warnings = list(state.get("warnings", []))
-    if not params.sources:
+    if not state["search_params"].sources:
         warnings.append("No job sources configured — search will return no results.")
     return {"warnings": warnings}
 
 
 def fan_out_sources(state: PipelineState) -> list[Send]:
-    """
-    Emit a Send for each enabled source. LangGraph runs all branches
-    concurrently; raw_results are accumulated via the operator.add reducer.
-    """
-    sources = state["search_params"].sources
-    return [Send(SOURCE_NODE_MAP[src], state) for src in sources if src in SOURCE_NODE_MAP]
-
-
-# ── Merge and dedup ────────────────────────────────────────────────────────────
+    """Return a Send per enabled source. LangGraph runs all concurrently."""
+    return [
+        Send(SOURCE_NODE_MAP[src], state)
+        for src in state["search_params"].sources
+        if src in SOURCE_NODE_MAP
+    ]
 
 
 async def merge_results(state: PipelineState) -> dict:
     """
-    Deduplicate raw_results by (company, title, location) fingerprint.
-    Cross-references the DB to suppress listings the user has already seen:
-      - skipped / applied / submitted → suppress silently
-      - queued / docs_draft → surface with a 'previously seen' badge (via notes)
-      - new (never triaged) → treat as fresh
-
-    Returns normalized JobListing objects in shortlist.
+    Deduplicate raw_results by fingerprint. Cross-references DB to suppress
+    listings the user has already handled (skipped, applied, submitted).
+    Previously queued/draft listings are surfaced with a badge.
     """
     raw = state.get("raw_results", [])
     if not raw:
         console.print("[yellow]No raw results from any source.[/yellow]")
         return {"shortlist": [], "skipped": []}
 
-    # Dedup within this run by fingerprint
-    seen_fps: dict[str, RawJobListing] = {}
+    seen: dict[str, RawJobListing] = {}
     for listing in raw:
         fp = _make_fingerprint(listing.company, listing.title, listing.location)
-        if fp not in seen_fps:
-            seen_fps[fp] = listing
+        if fp not in seen:
+            seen[fp] = listing
 
-    # Cross-reference DB for previously seen fingerprints
-    suppress_statuses = {JobStatus.SKIPPED, JobStatus.APPLIED, JobStatus.SUBMITTED, JobStatus.OFFER}
+    suppress = {JobStatus.SKIPPED, JobStatus.APPLIED, JobStatus.SUBMITTED, JobStatus.OFFER}
     previously_seen: dict[str, JobStatus] = {}
     try:
         conn = await get_connection()
         async with conn:
             async for row in await conn.execute(
                 "SELECT fingerprint, status FROM jobs WHERE fingerprint IN ({})".format(
-                    ",".join("?" * len(seen_fps))
+                    ",".join("?" * len(seen))
                 ),
-                list(seen_fps.keys()),
+                list(seen.keys()),
             ):
                 previously_seen[row["fingerprint"]] = JobStatus(row["status"])
     except Exception as exc:
         console.print(f"[yellow]⚠ DB lookup failed during merge: {exc}[/yellow]")
 
     shortlist: list[JobListing] = []
-    for fp, raw_listing in seen_fps.items():
-        prior_status = previously_seen.get(fp)
-        if prior_status in suppress_statuses:
-            continue  # Already handled; suppress silently
-        job = JobListing(
-            **raw_listing.model_dump(),
-            fingerprint=fp,
-            ats_type=_detect_ats(raw_listing.apply_url),
-        )
-        if prior_status in (JobStatus.QUEUED, JobStatus.DOCS_DRAFT, JobStatus.DOCS_READY):
-            job.notes = f"[previously seen — status: {prior_status.value}]"
+    for fp, raw_listing in seen.items():
+        prior = previously_seen.get(fp)
+        if prior in suppress:
+            continue
+        job = JobListing(**raw_listing.model_dump(), fingerprint=fp, ats_type=_detect_ats(raw_listing.apply_url))
+        if prior in (JobStatus.QUEUED, JobStatus.DOCS_DRAFT, JobStatus.DOCS_READY):
+            job.notes = f"[previously seen — status: {prior.value}]"
         shortlist.append(job)
 
-    console.print(f"[bold]Merged:[/bold] {len(raw)} raw → {len(shortlist)} unique (suppressed {len(seen_fps) - len(shortlist)})")
+    suppressed = len(seen) - len(shortlist)
+    console.print(f"[bold]Merged:[/bold] {len(raw)} raw → {len(shortlist)} unique (suppressed {suppressed})")
     return {"shortlist": shortlist, "skipped": []}
-
-
-# ── Triage interrupt ───────────────────────────────────────────────────────────
 
 
 async def triage_interrupt(state: PipelineState) -> dict:
     """
-    Human-in-the-loop gate.
-
-    Pauses the graph and surfaces the shortlist for user review. The CLI
-    collects per-listing apply/skip decisions and resumes with:
-      Command(resume={"apply": [job_id, ...], "skip": [job_id, ...]})
-
-    The graph checkpoints at this boundary. If the process dies here, the
-    user can resume the run the next day and this node re-presents the list.
+    Human-in-the-loop gate. Pauses the graph and surfaces the shortlist.
+    CLI resumes with Command(resume={"apply": [...], "skip": [...]}).
     """
     shortlist = state.get("shortlist", [])
     if not shortlist:
-        console.print("[yellow]No listings to triage — nothing to apply to.[/yellow]")
+        console.print("[yellow]No listings to triage.[/yellow]")
         return {}
-
-    # interrupt() suspends execution and surfaces data to the caller.
-    # The value passed here is what the CLI receives in GraphInterrupt.interrupts[0].value.
     decisions: dict = interrupt({
         "shortlist": [j.model_dump(mode="json") for j in shortlist],
         "message": f"Review {len(shortlist)} listings and mark each: apply / skip",
     })
-
     apply_ids = set(decisions.get("apply", []))
-    skip_ids = set(decisions.get("skip", []))
-
     approved = [j for j in shortlist if j.id in apply_ids]
-    new_skipped = [j for j in shortlist if j.id in skip_ids or j.id not in apply_ids]
-
+    new_skipped = [j for j in shortlist if j.id not in apply_ids]
     console.print(f"[green]Triage complete:[/green] {len(approved)} approved, {len(new_skipped)} skipped")
-    return {
-        "shortlist": approved,
-        "skipped": state.get("skipped", []) + new_skipped,
-    }
-
-
-# ── Persist to DB ──────────────────────────────────────────────────────────────
+    return {"shortlist": approved, "skipped": state.get("skipped", []) + new_skipped}
 
 
 async def persist_to_db(state: PipelineState) -> dict:
-    """
-    Write approved listings to the jobs table with status=queued.
-    Also writes a search_run record for ghost-listing detection in future runs.
-    On conflict (same fingerprint already in DB at a re-apply-eligible status),
-    updates the record rather than inserting a duplicate.
-    """
+    """Write approved listings to jobs table with status=queued."""
     approved = state.get("shortlist", [])
+    if not approved:
+        return {}
     params = state["search_params"]
     run_id = str(uuid4())
     now = datetime.utcnow().isoformat()
-
-    if not approved:
-        return {}
-
     try:
         conn = await get_connection()
         async with conn:
@@ -442,41 +528,30 @@ async def persist_to_db(state: PipelineState) -> dict:
                         source_url, apply_url, ats_type, description,
                         compensation_low, compensation_high, posted_date,
                         discovered_at, status, fingerprint, notes
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(fingerprint) DO UPDATE SET
                         status = CASE
-                            WHEN jobs.status IN ('skipped','applied','submitted','offer')
-                            THEN jobs.status
-                            ELSE 'queued'
-                        END,
+                            WHEN jobs.status IN ('skipped','applied','submitted','offer') THEN jobs.status
+                            ELSE 'queued' END,
                         notes = excluded.notes
                     """,
                     (
                         job.id, job.title, job.company, job.location,
                         job.workplace_type.value if job.workplace_type else None,
-                        job.source, job.source_url, job.apply_url,
-                        job.ats_type.value, job.description,
-                        job.compensation_low, job.compensation_high,
+                        job.source, job.source_url, job.apply_url, job.ats_type.value,
+                        job.description, job.compensation_low, job.compensation_high,
                         job.posted_date.isoformat() if job.posted_date else None,
                         now, JobStatus.QUEUED.value, job.fingerprint, job.notes,
                     ),
                 )
-            fingerprints_json = json.dumps([j.fingerprint for j in approved])
             await conn.execute(
-                """
-                INSERT INTO search_runs
-                  (id, run_at, params_json, sources_used,
-                   total_raw_results, total_shortlisted, total_approved, seen_job_ids)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    run_id, now, params.model_dump_json(),
-                    ",".join(params.sources),
-                    len(state.get("raw_results", [])),
-                    len(state.get("shortlist", [])) + len(state.get("skipped", [])),
-                    len(approved),
-                    fingerprints_json,
-                ),
+                "INSERT INTO search_runs (id,run_at,params_json,sources_used,"
+                "total_raw_results,total_shortlisted,total_approved,seen_job_ids) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (run_id, now, params.model_dump_json(), ",".join(params.sources),
+                 len(state.get("raw_results", [])),
+                 len(state.get("shortlist", [])) + len(state.get("skipped", [])),
+                 len(approved), json.dumps([j.fingerprint for j in approved])),
             )
             await conn.commit()
     except Exception as exc:
@@ -484,8 +559,7 @@ async def persist_to_db(state: PipelineState) -> dict:
         errors.append(f"persist_to_db failed: {exc}")
         console.print(f"[red]✗ DB persist error: {exc}[/red]")
         return {"errors": errors}
-
-    console.print(f"[green]✓ {len(approved)} jobs saved to DB (search run: {run_id[:8]})[/green]")
+    console.print(f"[green]✓ {len(approved)} jobs saved (run: {run_id[:8]})[/green]")
     return {}
 
 
@@ -496,24 +570,17 @@ def build_discoverer_graph() -> StateGraph:
     """
     Compile the Discoverer subgraph.
 
-    Topology:
       parse_search_params
             │
-      fan_out_sources  ──(Send)──►  scrape_indeed   ──┐
-                       ──(Send)──►  scrape_dice     ──┤
-                       ──(Send)──►  scrape_linkedin ──┤─► merge_results
-                       ──(Send)──►  scrape_ziprecruiter┘
-                                                        │
-                                                  triage_interrupt
-                                                        │
-                                                   persist_to_db
-                                                        │
-                                                       END
-
-    The fan_out_sources node uses add_conditional_edges with a routing
-    function that returns a list[Send] — one per enabled source. LangGraph
-    runs all Send branches in parallel and accumulates raw_results via the
-    operator.add reducer defined on PipelineState.
+      fan_out_sources ──(Send)──► scrape_indeed       ──┐
+                      ──(Send)──► scrape_dice         ──┤
+                      ──(Send)──► scrape_linkedin     ──┤──► merge_results
+                      ──(Send)──► scrape_ziprecruiter ──┘         │
+                                                           triage_interrupt
+                                                                   │
+                                                            persist_to_db
+                                                                   │
+                                                                  END
     """
     graph = StateGraph(PipelineState)
 
@@ -529,15 +596,9 @@ def build_discoverer_graph() -> StateGraph:
 
     graph.set_entry_point("parse_search_params")
     graph.add_edge("parse_search_params", "fan_out_sources")
-
-    # fan_out_sources returns list[Send] — LangGraph uses conditional edges
-    # to dispatch to the appropriate scraper nodes in parallel.
     graph.add_conditional_edges("fan_out_sources", fan_out_sources)
-
-    # All scraper nodes converge at merge_results
     for scraper in ("scrape_indeed", "scrape_dice", "scrape_linkedin", "scrape_ziprecruiter"):
         graph.add_edge(scraper, "merge_results")
-
     graph.add_edge("merge_results", "triage_interrupt")
     graph.add_edge("triage_interrupt", "persist_to_db")
     graph.add_edge("persist_to_db", END)
