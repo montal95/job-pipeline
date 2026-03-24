@@ -54,7 +54,19 @@ async def run_migrations() -> None:
             if migration_file.name in applied:
                 continue
             sql = migration_file.read_text()
-            await conn.executescript(sql)
+            try:
+                await conn.executescript(sql)
+            except Exception as exc:
+                # ALTER TABLE ADD COLUMN raises OperationalError("duplicate column name: X")
+                # if a previous run applied the DDL but crashed before recording it in
+                # _migrations. The columns already exist — safe to record and continue.
+                if "duplicate column name" in str(exc).lower():
+                    print(
+                        f"[db] Warning: {migration_file.name} — columns already exist "
+                        f"(prior partial run?). Recording as applied and continuing."
+                    )
+                else:
+                    raise
             await conn.execute(
                 "INSERT INTO _migrations (filename, applied_at) VALUES (?, datetime('now'))",
                 (migration_file.name,),
