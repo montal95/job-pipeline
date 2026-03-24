@@ -69,8 +69,83 @@ def _format_days_since(date_str: str) -> str:
 
 
 def load_pipeline(state: PipelineState) -> dict:
-    """Query DB for all jobs with active statuses. Phase 5 target."""
-    return {}
+    """
+    Query the DB for all jobs with non-terminal statuses and populate shortlist.
+    Also loads submission follow-up data into state for use by render_dashboard
+    and flag_overdue.
+
+    Active statuses: new, queued, docs_draft, docs_ready, submitted, applied,
+    possibly_inactive. Skips: rejected, offer, skipped.
+
+    Uses sync sqlite3 — same pattern as writer and submitter nodes.
+    """
+    import sqlite3
+
+    active_statuses = (
+        "new", "queued", "docs_draft", "docs_ready",
+        "submitted", "applied", "possibly_inactive",
+    )
+    placeholders = ",".join("?" * len(active_statuses))
+
+    db_path = str(settings.app_db_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            f"SELECT * FROM jobs WHERE status IN ({placeholders}) ORDER BY discovered_at DESC",
+            active_statuses,
+        ).fetchall()
+        sub_rows = conn.execute(
+            """
+            SELECT s.job_id, s.followup_due_date, s.submitted_at
+              FROM submissions s
+              JOIN jobs j ON j.id = s.job_id
+             WHERE j.status IN ('submitted', 'applied')
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    jobs = [
+        JobListing.model_validate({
+            "id": r["id"],
+            "title": r["title"],
+            "company": r["company"],
+            "location": r["location"],
+            "workplace_type": r["workplace_type"],
+            "source": r["source"],
+            "source_url": r["source_url"],
+            "apply_url": r["apply_url"],
+            "ats_type": r["ats_type"] or "unknown",
+            "description": r["description"],
+            "compensation_low": r["compensation_low"],
+            "compensation_high": r["compensation_high"],
+            "posted_date": r["posted_date"],
+            "discovered_at": r["discovered_at"],
+            "status": r["status"],
+            "fit_signal": r["fit_signal"],
+            "company_headcount": r["company_headcount"],
+            "fingerprint": r["fingerprint"] or "",
+            "resume_path": r["resume_path"],
+            "cover_letter_path": r["cover_letter_path"],
+            "notes": r["notes"],
+        })
+        for r in rows
+    ]
+
+    submissions = [
+        {
+            "job_id": r["job_id"],
+            "followup_due_date": r["followup_due_date"],
+            "submitted_at": r["submitted_at"],
+        }
+        for r in sub_rows
+    ]
+
+    return {
+        "shortlist": state.get("shortlist", []) + jobs,
+        "tracker_submissions": submissions,
+    }
 
 
 def render_dashboard(state: PipelineState) -> dict:
@@ -88,10 +163,33 @@ def render_dashboard(state: PipelineState) -> dict:
 
 def update_status(state: PipelineState) -> dict:
     """
-    Accept CLI args or interactive prompts to move a job's status.
-    All status transitions require user intent — nothing auto-updates.
-    Phase 5 target.
+    Advance a job's status in the DB and record updated_at.
+
+    Reads current_job_id and tracker_new_status from state.
+    If either is absent, returns without writing (no-op).
+    All transitions are user-driven — no guards or validation applied here.
     """
+    import sqlite3
+
+    job_id = state.get("current_job_id")
+    new_status = state.get("tracker_new_status")
+
+    if not job_id or not new_status:
+        return {}
+
+    db_path = str(settings.app_db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE jobs SET status = ?, updated_at = datetime('now') WHERE id = ?",
+            (new_status, job_id),
+        )
+        conn.commit()
+    except Exception as exc:
+        return {"errors": state.get("errors", []) + [f"update_status: {exc}"]}
+    finally:
+        conn.close()
+
     return {}
 
 

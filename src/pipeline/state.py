@@ -178,6 +178,7 @@ class PipelineState(TypedDict):
 
     # Tracker
     tracker_new_status: str | None   # target status for update_status node
+    tracker_submissions: list[dict]  # follow-up data loaded by load_pipeline
 
     # Human-in-the-loop signals
     human_approved: bool
@@ -210,6 +211,7 @@ def empty_state() -> PipelineState:
         ats_field_map={},
         submission_confirmed=False,
         tracker_new_status=None,
+        tracker_submissions=[],
         human_approved=False,
         human_feedback=None,
         errors=[],
