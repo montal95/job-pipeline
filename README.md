@@ -8,17 +8,55 @@ A LangGraph multi-agent job application pipeline. Four agents — Discoverer, Wr
 
 ## Architecture
 
-```
-CLI input ──► [discover] ──► [write] ──► [submit]
-                  │                          │
-                  └────────── [track] ◄───────┘
-                                  │
-                             SQLite DB
-                    (jobs, submissions, search_runs,
-                          company_cache)
+The pipeline runs four LangGraph subgraphs in sequence. Each agent is
+independently enterable from the CLI — you can re-run the Writer on a
+specific job without re-running discovery.
+
+```mermaid
+flowchart TD
+    CLI(["pipeline CLI"])
+
+    CLI -->|discover| D
+    CLI -->|write JOB_ID| W
+    CLI -->|submit JOB_ID| S
+    CLI -->|track| T
+    CLI -->|run| FLOW["discover → write → submit → track"]
+
+    subgraph D["Discoverer"]
+        direction LR
+        d1["scrape\n(parallel Send)"] --> d2["merge & dedup"] --> d3["triage\n⚡ interrupt"] --> d4["persist"]
+    end
+
+    subgraph W["Writer"]
+        direction LR
+        w1["interview\n⚡ interrupt"] --> w2["LLM generate"] --> w3["review\n⚡ interrupt"]
+        w3 -->|approved| w4["persist JSON"]
+        w3 -->|feedback| w2
+    end
+
+    subgraph S["Submitter"]
+        direction LR
+        s1["scan form"] --> s2["render docs\nif needed"] --> s3["fill form"] --> s4["gate\n⚡ interrupt"] -->|yes| s5["submit & receipt"]
+    end
+
+    subgraph T["Tracker"]
+        direction LR
+        t1["load"] --> t2["schedule\nfollow-ups"] --> t3["flag\noverdue"] --> t4["dashboard"]
+    end
+
+    DB[("SQLite\npipeline.db")]
+    CDB[("SQLite\ncheckpoints.db")]
+
+    D & W & S & T --> DB
+    D & W & S -.->|"LangGraph\ncheckpoint"| CDB
 ```
 
-Each agent is a compiled LangGraph subgraph. The top-level graph wires them together with a shared `AsyncSqliteSaver` checkpoint store — interrupted runs resume from the last completed node.
+**⚡ interrupt** = LangGraph `interrupt()` call — graph checkpoints here, terminal
+waits for user input, resumes via `Command(resume=...)`. Closing the terminal is safe;
+re-running the same command restores from the checkpoint.
+
+Each agent is a compiled LangGraph subgraph. The shared `AsyncSqliteSaver` checkpoint
+store enables resume-from-failure across all interrupt boundaries.
 
 **LangGraph patterns exercised so far:**
 - `Send` API — parallel fan-out across job sources (Discoverer, Phase 1)
