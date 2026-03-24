@@ -162,21 +162,139 @@ def _render_documents_if_needed(state: PipelineState) -> dict:
 
 
 def load_job(state: PipelineState) -> dict:
-    """Fetch job record + doc paths from DB by current_job_id. Phase 7 target."""
-    return {}
+    """
+    Fetch job record from DB by current_job_id and add to shortlist.
+    Same pattern as writer.load_job — sync sqlite3 to avoid event loop conflicts.
+    Skips if job is already in shortlist (supports resume-from-checkpoint).
+    """
+    import sqlite3
+
+    job_id = state.get("current_job_id")
+    if not job_id:
+        return {"errors": state.get("errors", []) + ["load_job: current_job_id not set"]}
+
+    if any(j.id == job_id for j in state.get("shortlist", [])):
+        return {}
+
+    from pipeline.state import JobListing
+
+    conn = sqlite3.connect(str(settings.app_db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    finally:
+        conn.close()
+
+    if row is None:
+        return {"errors": state.get("errors", []) + [f"load_job: job '{job_id}' not found in DB"]}
+
+    job = JobListing.model_validate({
+        "id": row["id"],
+        "title": row["title"],
+        "company": row["company"],
+        "location": row["location"],
+        "workplace_type": row["workplace_type"],
+        "source": row["source"],
+        "source_url": row["source_url"],
+        "apply_url": row["apply_url"],
+        "ats_type": row["ats_type"] or "unknown",
+        "description": row["description"],
+        "compensation_low": row["compensation_low"],
+        "compensation_high": row["compensation_high"],
+        "posted_date": row["posted_date"],
+        "discovered_at": row["discovered_at"],
+        "status": row["status"],
+        "fit_signal": row["fit_signal"],
+        "company_headcount": row["company_headcount"],
+        "fingerprint": row["fingerprint"] or "",
+        "resume_path": row["resume_path"],
+        "cover_letter_path": row["cover_letter_path"],
+        "notes": row["notes"],
+    })
+    return {"shortlist": state.get("shortlist", []) + [job]}
 
 
 def detect_ats(state: PipelineState) -> dict:
-    """Fingerprint the apply URL. Imports from pipeline.ats. Phase 7 target."""
-    return {}
+    """
+    Fingerprint the apply_url to determine ATS type.
+    Imports detect_ats from pipeline.ats — shared with Discoverer.
+    Writes ats_type back to state for downstream nodes.
+    """
+    from pipeline.ats import detect_ats as _detect
+
+    job = next(
+        (j for j in state.get("shortlist", []) if j.id == state.get("current_job_id")),
+        None,
+    )
+    if job is None:
+        return {}
+
+    ats_type = _detect(job.apply_url)
+    return {"shortlist": [
+        j.model_copy(update={"ats_type": ats_type}) if j.id == job.id else j
+        for j in state.get("shortlist", [])
+    ]}
 
 
 def scan_form(state: PipelineState) -> dict:
     """
-    Navigate to apply_url, snapshot form HTML, detect file inputs and map fields.
-    Sets needs_file_upload and ats_field_map in state. Phase 7 target.
+    Navigate to apply_url with Playwright, snapshot the form HTML, detect file
+    inputs and build the ATS field map.
+
+    Sets:
+      needs_file_upload: bool  — True if any <input type="file"> found
+      ats_field_map: dict      — label → CSS selector for text/email/tel fields
+
+    Safe fallback if Playwright is unavailable or navigation fails:
+      needs_file_upload=True, ats_field_map={}, warning appended.
+    This ensures the render node runs and files are available even if scan fails.
+
+    Workday note: Workday drops connections on programmatic navigation.
+    When Workday is detected, scan_form surfaces a warning and returns an empty
+    field map — fill_form handles the Workday fallback path.
     """
-    return {}
+    job = next(
+        (j for j in state.get("shortlist", []) if j.id == state.get("current_job_id")),
+        None,
+    )
+    if job is None or not job.apply_url:
+        return {
+            "needs_file_upload": True,
+            "ats_field_map": {},
+            "warnings": state.get("warnings", []) + ["scan_form: no apply_url — skipping form scan"],
+        }
+
+    # Workday: skip programmatic navigation, surface manual fallback warning
+    if job.ats_type == AtsType.WORKDAY:
+        return {
+            "needs_file_upload": False,
+            "ats_field_map": {},
+            "warnings": state.get("warnings", []) + [
+                f"scan_form: Workday detected — programmatic navigation blocked. "
+                f"Open {job.apply_url} manually in Chrome, then resume."
+            ],
+        }
+
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(job.apply_url, wait_until="domcontentloaded", timeout=15000)
+            html = page.content()
+            browser.close()
+
+        needs_upload = _has_file_input(html)
+        field_map = _map_form_fields(html, job.ats_type)
+        return {"needs_file_upload": needs_upload, "ats_field_map": field_map}
+
+    except Exception as exc:
+        return {
+            "needs_file_upload": True,
+            "ats_field_map": {},
+            "warnings": state.get("warnings", []) + [f"scan_form: navigation failed ({exc}) — defaulting to upload=True"],
+        }
 
 
 def render_documents_if_needed(state: PipelineState) -> dict:
