@@ -2,7 +2,7 @@
 
 A LangGraph multi-agent job application pipeline. Four agents — Discoverer, Writer, Submitter, Tracker — coordinate to automate job search, document generation, form submission, and follow-up tracking.
 
-**Status:** Phase 4 complete — Submitter agent fully implemented. ATS detection, conditional docx rendering, Playwright form fill, hard submission gate interrupt, screenshot receipting, and DB persistence. 95/95 tests passing.
+**Status:** Phase 5 complete — all four agents fully implemented. Tracker agent provides a Rich terminal dashboard, follow-up scheduling, overdue detection, and status updates. `pipeline run` end-to-end command wired. 104/104 tests passing.
 
 ---
 
@@ -74,7 +74,9 @@ fails on platforms where the `playwright` wheel isn't available (Linux x86_64 in
 .venv\Scripts\pytest.exe tests\ -v  # Windows PowerShell (note the & prefix: & .\.venv\Scripts\pytest.exe)
 ```
 
-**Current test count: 95 passing** across 8 domain-named test files (see Project structure below).
+- **LangGraph as DB workflow orchestrator** — Tracker uses LangGraph to sequence purely synchronous SQLite operations with no LLMs or async I/O, demonstrating the pattern is useful beyond AI workflows (Phase 5)
+
+**Current test count: 104 passing** across 8 domain-named test files (see Project structure below).
 
 
 ---
@@ -109,10 +111,11 @@ src/pipeline/
     discoverer.py    # ✅ Phase 1+2: httpx scrapers, Playwright auth, Send fan-out, triage
     writer.py        # ✅ Phase 3: CV → tailored resume + cover letter (revision loop, 2 interrupt gates)
     submitter.py     # ✅ Phase 4: ATS form fill, conditional render, hard submission gate
-    tracker.py       # 🔜 Phase 5: Status dashboard, follow-up scheduling
+    tracker.py       # ✅ Phase 5: Status dashboard, follow-up scheduling, overdue detection
 migrations/
   001_initial.sql    # jobs, submissions, search_runs, company_cache tables
   002_content_json_columns.sql  # resume_content_json + cover_letter_content_json columns
+  003_updated_at_column.sql     # updated_at column on jobs
 scripts/
   save_auth.py       # ✅ Phase 2: interactive Chrome login → saves playwright/.auth/
 tests/
@@ -137,10 +140,12 @@ tests/
   test_discoverer.py # Fingerprint, compensation, merge_results, card parsers, auth, scrapers (34 tests)
   test_writer.py     # CV loading, gap extraction, prompts, parsers, docx rendering, nodes (19 tests)
   test_submitter.py  # File input detection, field mapping, conditional render, confirmation, routing (13 tests)
+  test_tracker.py    # Status counting, overdue detection, days-since, load_pipeline, update_status (9 tests)
 docs/
   phase2-handoff.md
   phase3-handoff.md
   phase4-handoff.md
+  phase5-handoff.md
 ```
 
 
@@ -155,8 +160,8 @@ docs/
 | 2 | Playwright auth sessions (LinkedIn, ZipRecruiter), save_auth.py helper | ✅ Complete |
 | 3 | Writer — LLM calls, python-docx rendering, revision loop | ✅ Complete |
 | 4 | Submitter — ATS strategies, Playwright form fill, hard submission gate | ✅ Complete |
-| 5 | Tracker — rich dashboard, follow-up scheduling | 🔜 Next |
-| 6 | Polish, Mermaid architecture diagram, blog post | ⬜ |
+| 5 | Tracker — Rich dashboard, follow-up scheduling, `pipeline run` end-to-end | ✅ Complete |
+| 6 | Polish, Mermaid architecture diagram, blog post | 🔜 Next |
 
 ---
 
@@ -296,6 +301,39 @@ makes the graph topology self-documenting.
 state and exits the process. The Playwright browser opened by `fill_form` is gone by
 the time `submit_form` runs. `submit_form` therefore re-navigates and re-fills before
 clicking submit — the re-fill is not a bug, it's necessary.
+
+---
+
+## Tracker — what Phase 5 built
+
+The Tracker agent is the simplest graph in the pipeline — purely synchronous DB
+operations and Rich terminal output, no LLMs and no async I/O. It demonstrates
+that LangGraph is useful as a workflow orchestrator even when AI isn't involved.
+
+```
+load_pipeline → schedule_followup → flag_overdue → render_dashboard
+                                                          │
+                                                   update_status → END
+```
+
+**Node order matters.** `schedule_followup` runs before `flag_overdue` so
+follow-up dates are written to the DB before the overdue check reads them.
+`flag_overdue` runs before `render_dashboard` so the ⚠ indicator in the
+Active Applications table has the overdue warning list available.
+`update_status` is last and is a no-op unless `tracker_new_status` is set
+in state — safe to always run at the end.
+
+**Pure functions drive the testable logic.** `_count_by_status`,
+`_find_overdue`, and `_format_days_since` are all pure Python with no
+DB or terminal dependencies. The node implementations (`render_dashboard`,
+`schedule_followup`, `flag_overdue`) are not unit-tested for the same reason
+as Playwright nodes — their outputs are terminal side-effects or DB writes
+that are integration concerns, not unit concerns.
+
+**`pipeline run` end-to-end.** Phase 5 also wires the full `pipeline run`
+command: discover → write queued jobs → submit → track. After triage, it
+queries the DB for jobs at `status=queued` and calls `_write` + `_submit`
+for each one before running the tracker dashboard.
 
 ---
 
