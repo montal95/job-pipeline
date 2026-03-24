@@ -2,7 +2,7 @@
 
 A LangGraph multi-agent job application pipeline. Four agents — Discoverer, Writer, Submitter, Tracker — coordinate to automate job search, document generation, form submission, and follow-up tracking.
 
-**Status:** Phase 1 complete — Discoverer agent fully implemented with parallel scraper fan-out, fingerprint dedup, DB suppression of previously-seen listings, and an interrupt-based triage gate. 34/34 tests passing.
+**Status:** Phase 2 complete — All four job sources active. LinkedIn and ZipRecruiter scrapers use Playwright `storage_state` auth. Stale session detection with actionable re-run instructions. 51/51 tests passing.
 
 ---
 
@@ -27,8 +27,7 @@ Each agent is a compiled LangGraph subgraph. The top-level graph wires them toge
 - `AsyncSqliteSaver` — checkpoint store for resume-from-failure (Phase 0)
 
 **Coming next:**
-- Playwright persistent auth sessions for LinkedIn + ZipRecruiter (Phase 2)
-- Cycles — revision loop in the Writer (Phase 3)
+- Writer agent — LLM calls, python-docx rendering, revision loop (Phase 3)
 
 
 ---
@@ -38,10 +37,10 @@ Each agent is a compiled LangGraph subgraph. The top-level graph wires them toge
 **Requirements:** Python 3.11+, [uv](https://docs.astral.sh/uv/)
 
 ```bash
-# 1. Clone and install (excludes playwright — not needed for Phase 1)
+# 1. Clone and install
 git clone https://github.com/montal95/job-pipeline
 cd job-pipeline
-uv sync --no-install-package playwright
+uv sync
 
 # 2. Configure
 cp .env.example .env
@@ -50,8 +49,15 @@ cp .env.example .env
 # 3. Initialize the database
 pipeline db migrate
 
-# 4. Run a discovery search
-pipeline discover --query "rails engineer" --location "Chicago, IL" --sources "indeed,dice"
+# 4. (Optional) Save LinkedIn and ZipRecruiter auth sessions — Windows only
+python scripts/save_auth.py --platform all
+# This opens a Chrome window. Log in to each tab, then press Enter.
+# Sessions are saved to playwright/.auth/ and last ~30 days.
+
+# 5. Run a discovery search
+pipeline discover --query "rails engineer" --location "Chicago, IL"
+# Default sources: indeed,dice
+# With auth:       --sources "indeed,dice,linkedin,ziprecruiter"
 ```
 
 ### Running tests
@@ -65,7 +71,7 @@ fails on platforms where the `playwright` wheel isn't available (Linux x86_64 in
 .venv\Scripts\pytest.exe tests\ -v  # Windows PowerShell (note the & prefix: & .\.venv\Scripts\pytest.exe)
 ```
 
-**Current test count: 34 passing** (11 Phase 0 smoke tests + 23 Phase 1 Discoverer unit tests)
+**Current test count: 51 passing** (11 Phase 0 + 23 Phase 1 + 17 Phase 2)
 
 
 ---
@@ -81,7 +87,9 @@ pipeline run [--query QUERY] [--location LOCATION]
 pipeline db migrate
 ```
 
-`--sources` is a comma-separated list: `indeed,dice,linkedin,ziprecruiter`. Defaults to `indeed,dice` until Phase 2 (Playwright auth) is complete.
+`--sources` accepts `indeed`, `dice`, `linkedin`, `ziprecruiter` (comma-separated).  
+LinkedIn and ZipRecruiter require a saved auth session — run `save_auth.py` first.  
+If an auth file is missing or expired, the scraper warns and falls back gracefully.
 
 ---
 
@@ -95,17 +103,24 @@ src/pipeline/
   graph.py           # Top-level graph with AsyncSqliteSaver checkpointing
   cli.py             # typer CLI — all subcommands; interrupt/resume for discover
   agents/
-    discoverer.py    # ✅ Phase 1: httpx scrapers, Send fan-out, dedup, triage interrupt
+    discoverer.py    # ✅ Phase 1+2: httpx scrapers, Playwright auth, Send fan-out, triage
     writer.py        # 🔜 Phase 3: CV → tailored resume + cover letter (revision loop)
     submitter.py     # 🔜 Phase 4: ATS form fill + hard submission gate
     tracker.py       # 🔜 Phase 5: Status dashboard, follow-up scheduling
 migrations/
   001_initial.sql    # jobs, submissions, search_runs, company_cache tables
+scripts/
+  save_auth.py       # ✅ Phase 2: interactive Chrome login → saves playwright/.auth/
 tests/
   fixtures/
-    sample_jobs.py   # Synthetic cross-source fixtures for Discoverer tests
+    sample_jobs.py              # Synthetic cross-source fixtures (Phase 1)
+    linkedin_job_cards.html     # Minimal LinkedIn card DOM (Phase 2)
+    ziprecruiter_job_cards.html # Minimal ZipRecruiter card DOM (Phase 2)
   test_phase0.py     # Graph compilation + state schema smoke tests (11 tests)
   test_phase1.py     # Discoverer unit tests — fingerprint, dedup, ATS, Send (23 tests)
+  test_phase2.py     # Auth helpers, card parsers, scraper node behavior (17 tests)
+docs/
+  phase2-handoff.md  # Commit plan and architecture decisions for Phase 2
 ```
 
 
@@ -117,8 +132,8 @@ tests/
 |-------|-------|--------|
 | 0 | Scaffolding, state schema, DB, stub graphs, CLI | ✅ Complete |
 | 1 | Discoverer — httpx scrapers, Send API fan-out, triage interrupt, persist to DB | ✅ Complete |
-| 2 | Playwright auth sessions (LinkedIn, ZipRecruiter) | 🔜 Next |
-| 3 | Writer — LLM calls, python-docx rendering, revision loop | ⬜ |
+| 2 | Playwright auth sessions (LinkedIn, ZipRecruiter), save_auth.py helper | ✅ Complete |
+| 3 | Writer — LLM calls, python-docx rendering, revision loop | 🔜 Next |
 | 4 | Submitter — ATS strategies, Playwright form fill | ⬜ |
 | 5 | Tracker — rich dashboard, follow-up scheduling | ⬜ |
 | 6 | Polish, Mermaid architecture diagram, blog post | ⬜ |
