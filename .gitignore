@@ -1,0 +1,52 @@
+# ── Environment & secrets ─────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── CV and personal documents ──────────────────────────────────────────────────
+*.pdf
+*.docx
+!tests/fixtures/*.pdf
+!tests/fixtures/*.docx
+
+# ── SQLite databases ───────────────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Docker volumes ─────────────────────────────────────────────────────────────
+data/
+volumes/
+
+# ── Playwright session state ───────────────────────────────────────────────────
+auth.json
+playwright/.auth/
+.playwright/
+
+# ── Generated output ───────────────────────────────────────────────────────────
+output/
+outputs/
+screenshots/
+
+# ── Python runtime ─────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── uv ─────────────────────────────────────────────────────────────────────────
+.uv/
+
+# ── OS and editor noise ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
