@@ -7,13 +7,20 @@ this between runs using thread IDs, enabling resume-from-failure.
 The Pydantic models here serve two roles:
   1. Typed containers for data flowing through the graph
   2. DB row representations (serialized to/from SQLite as JSON)
+
+Phase 1 note:
+  raw_results uses Annotated[list[...], operator.add] so parallel scraper
+  nodes can each return {"raw_results": [...]} and LangGraph accumulates
+  them via the reducer rather than overwriting. This is required for the
+  Send API fan-out pattern in the Discoverer.
 """
 
 from __future__ import annotations
 
+import operator
 from datetime import date, datetime
 from enum import Enum
-from typing import TypedDict
+from typing import Annotated, TypedDict
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -121,7 +128,9 @@ class SubmissionStatus(BaseModel):
 class PipelineState(TypedDict):
     # Search context
     search_params: SearchParams
-    raw_results: list[RawJobListing]
+    # Annotated with operator.add so parallel scrapers accumulate results
+    # instead of overwriting each other. Required for the Send API fan-out.
+    raw_results: Annotated[list[RawJobListing], operator.add]
 
     # Triage
     shortlist: list[JobListing]

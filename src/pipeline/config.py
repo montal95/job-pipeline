@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,10 +10,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     # Anthropic
-    anthropic_api_key: str
+    anthropic_api_key: str = "unset"
 
     # Paths
-    cv_path: str
+    cv_path: str = "./cv.pdf"
     app_db_path: str = "./data/pipeline.db"
     checkpoint_db_path: str = "./data/checkpoints.db"
     output_dir: str = "./output"
@@ -34,4 +35,4 @@ class Settings(BaseSettings):
         return [s.strip() for s in self.enabled_sources.split(",")]
 
 
-settings = Settings()  # type: ignore[call-arg]  # loaded from .env
+settings = Settings()
