@@ -509,12 +509,10 @@ def pre_write_interview(state: PipelineState) -> dict:
 
 def write_resume(state: PipelineState) -> dict:
     """
-    LLM call (Anthropic API): generate resume content as structured JSON,
-    then render immediately to .docx. One call per round.
-
-    Rendering happens here rather than in the separate render_resume_docx node
-    so that the revision loop (apply_feedback → write_resume) re-renders in
-    a single step without an extra node hop.
+    LLM call (Anthropic API): generate resume content as structured JSON.
+    Does NOT render to .docx — rendering is deferred to the Submitter, which
+    only renders if the ATS form has a file upload input (Option B architecture).
+    One LLM call per round.
     """
     job = next(
         (j for j in state.get("shortlist", []) if j.id == state.get("current_job_id")),
@@ -537,17 +535,13 @@ def write_resume(state: PipelineState) -> dict:
     raw = message.content[0].text
     content = _parse_resume_json(raw)
 
-    output_dir = str(settings.output_dir)
-    output_path = f"{output_dir}/{job.id}_resume.docx"
-    _render_resume_docx(content, output_path)
-
-    return {"resume_content": content, "resume_path": output_path}
+    return {"resume_content": content}
 
 
 def write_cover_letter(state: PipelineState) -> dict:
     """
-    LLM call (Anthropic API): generate cover letter content as structured JSON,
-    then render immediately to .docx.
+    LLM call (Anthropic API): generate cover letter content as structured JSON.
+    Does NOT render to .docx — rendering is deferred to the Submitter (Option B).
     """
     job = next(
         (j for j in state.get("shortlist", []) if j.id == state.get("current_job_id")),
@@ -570,11 +564,7 @@ def write_cover_letter(state: PipelineState) -> dict:
     raw = message.content[0].text
     content = _parse_cover_letter_json(raw)
 
-    output_dir = str(settings.output_dir)
-    output_path = f"{output_dir}/{job.id}_cover_letter.docx"
-    _render_cover_letter_docx(content, output_path)
-
-    return {"cover_letter_content": content, "cover_letter_path": output_path}
+    return {"cover_letter_content": content}
 
 
 def render_resume_docx(state: PipelineState) -> dict:
@@ -589,18 +579,48 @@ def render_cover_letter_docx(state: PipelineState) -> dict:
 
 def review_interrupt(state: PipelineState) -> dict:
     """
-    Human-in-the-loop gate: show generated doc paths, wait for the user to
-    approve, provide feedback, or abort.
+    Human-in-the-loop gate: show a Rich text preview of generated content,
+    wait for the user to approve, provide feedback, or abort.
+
+    Displays a plain-text preview of resume_content (name, summary, section
+    headings + bullet counts) instead of file paths, since docx rendering is
+    now deferred to the Submitter.
 
     interrupt() returns the string supplied by Command(resume=...):
       "approve" or None → persist_documents
       "abort"           → exits with a warning (handled by CLI)
       any other string  → stored as human_feedback → routes to apply_feedback
     """
+    resume_content = state.get("resume_content")
+    cl_content = state.get("cover_letter_content")
+
+    # Build plain-text preview strings
+    if resume_content:
+        section_summary = ", ".join(
+            f"{s.heading} ({len(s.bullets)} bullets)"
+            for s in resume_content.sections
+        )
+        resume_preview = (
+            f"{resume_content.name}\n"
+            f"Summary: {resume_content.summary[:200]}{'...' if len(resume_content.summary) > 200 else ''}\n"
+            f"Sections: {section_summary}\n"
+            f"Skills: {len(resume_content.skills)} items"
+        )
+    else:
+        resume_preview = "(no resume content)"
+
+    if cl_content:
+        cover_letter_preview = (
+            f"Opening: {cl_content.opening[:150]}{'...' if len(cl_content.opening) > 150 else ''}\n"
+            f"Body paragraphs: {len(cl_content.body_paragraphs)}"
+        )
+    else:
+        cover_letter_preview = "(no cover letter content)"
+
     feedback = interrupt({
-        "resume_path": state.get("resume_path"),
-        "cover_letter_path": state.get("cover_letter_path"),
-        "message": "Review documents. Reply: 'approve', 'abort', or type feedback.",
+        "resume_preview": resume_preview,
+        "cover_letter_preview": cover_letter_preview,
+        "message": "Review content preview. Reply: 'approve', 'abort', or type feedback.",
     })
 
     if feedback is None or str(feedback).strip().lower() == "approve":
@@ -620,7 +640,7 @@ def apply_feedback(state: PipelineState) -> dict:
     Targeted LLM call to revise resume based on user feedback.
     Passes the previous resume JSON + feedback as a revision prompt —
     cheaper and more accurate than full regeneration.
-    Increments revision_round. Re-renders both docs.
+    Increments revision_round. Does NOT render — rendering stays deferred.
     """
     job = next(
         (j for j in state.get("shortlist", []) if j.id == state.get("current_job_id")),
@@ -647,22 +667,20 @@ def apply_feedback(state: PipelineState) -> dict:
     raw = message.content[0].text
     content = _parse_resume_json(raw)
 
-    output_dir = str(settings.output_dir)
-    job_id = state.get("current_job_id", "unknown")
-    resume_path = f"{output_dir}/{job_id}_resume.docx"
-    _render_resume_docx(content, resume_path)
-
     return {
         "resume_content": content,
-        "resume_path": resume_path,
         "revision_round": state.get("revision_round", 0) + 1,
-        "human_feedback": None,  # clear feedback after applying
+        "human_feedback": None,
     }
 
 
 def persist_documents(state: PipelineState) -> dict:
     """
-    Update the jobs row with generated document paths and advance status to docs_ready.
+    Serialize resume_content and cover_letter_content to JSON and write to
+    the new resume_content_json / cover_letter_content_json DB columns.
+    Advances job status to docs_ready.
+    File path columns (resume_path, cover_letter_path) stay NULL — the
+    Submitter renders .docx files only when the ATS form has a file upload.
     Uses sync sqlite3 — same rationale as load_job.
     """
     import sqlite3
@@ -671,18 +689,24 @@ def persist_documents(state: PipelineState) -> dict:
     if not job_id:
         return {}
 
+    resume_content = state.get("resume_content")
+    cl_content = state.get("cover_letter_content")
+
+    resume_json = resume_content.model_dump_json() if resume_content else None
+    cl_json = cl_content.model_dump_json() if cl_content else None
+
     db_path = str(settings.app_db_path)
     conn = sqlite3.connect(db_path)
     try:
         conn.execute(
             """
             UPDATE jobs
-               SET resume_path = ?,
-                   cover_letter_path = ?,
+               SET resume_content_json = ?,
+                   cover_letter_content_json = ?,
                    status = 'docs_ready'
              WHERE id = ?
             """,
-            (state.get("resume_path"), state.get("cover_letter_path"), job_id),
+            (resume_json, cl_json, job_id),
         )
         conn.commit()
     except Exception as exc:

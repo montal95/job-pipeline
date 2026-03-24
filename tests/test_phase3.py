@@ -263,7 +263,7 @@ def test_write_resume_calls_llm_once(cv_text, sample_job, tmp_path):
             result = write_resume(state)
 
     mock_client.messages.create.assert_called_once()
-    assert result.get("resume_path") is not None
+    assert result.get("resume_content") is not None
 
 
 def test_apply_feedback_increments_revision_round(cv_text, sample_job, tmp_path):
