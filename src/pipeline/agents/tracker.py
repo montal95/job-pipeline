@@ -1,20 +1,68 @@
 """
-Tracker Agent — Phase 5 implementation target.
+Tracker Agent — Phase 5 implementation.
 
 Responsibility: Status dashboard, follow-up scheduling, status updates.
 Zero LLM calls — pure DB reads/writes and terminal rendering via rich.
 
-LangGraph patterns exercised here:
-  - Querying checkpoint state vs. application DB state (the distinction matters)
-
-Current state: Phase 0 stubs.
+LangGraph pattern exercised here:
+  - Graph as workflow orchestrator for purely synchronous DB operations.
+    Demonstrates that LangGraph is useful even without LLMs or async I/O.
 """
 
 from __future__ import annotations
 
+from datetime import date
+
 from langgraph.graph import END, StateGraph
 
-from pipeline.state import PipelineState
+from pipeline.config import settings
+from pipeline.state import JobListing, JobStatus, PipelineState
+
+
+# ── Pure helper functions (unit testable — no DB, no Rich, no LangGraph) ──────
+
+
+def _count_by_status(jobs: list[JobListing]) -> dict[str, int]:
+    """Return a dict of status → count for a list of JobListings."""
+    counts: dict[str, int] = {}
+    for job in jobs:
+        key = job.status.value if isinstance(job.status, JobStatus) else str(job.status)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _find_overdue(jobs: list[JobListing], submissions: list[dict]) -> list[str]:
+    """
+    Return job IDs where followup_due_date has passed and status is still 'applied'.
+
+    submissions is a list of dicts with at least job_id and followup_due_date keys,
+    matching the submissions table schema.
+    """
+    today = date.today().isoformat()
+    applied_ids = {
+        j.id for j in jobs
+        if (j.status.value if isinstance(j.status, JobStatus) else str(j.status)) == "applied"
+    }
+    return [
+        s["job_id"] for s in submissions
+        if s["job_id"] in applied_ids
+        and s.get("followup_due_date") is not None
+        and s["followup_due_date"] < today
+    ]
+
+
+def _format_days_since(date_str: str) -> str:
+    """
+    Return a human-readable relative date string given an ISO date string.
+    Examples: 'today', '1 day ago', '7 days ago'.
+    Only the date portion (YYYY-MM-DD) is used; time components are ignored.
+    """
+    delta = (date.today() - date.fromisoformat(date_str[:10])).days
+    if delta == 0:
+        return "today"
+    if delta == 1:
+        return "1 day ago"
+    return f"{delta} days ago"
 
 
 # ── Node stubs ─────────────────────────────────────────────────────────────────
