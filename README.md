@@ -2,7 +2,7 @@
 
 A LangGraph multi-agent job application pipeline. Four agents — Discoverer, Writer, Submitter, Tracker — coordinate to automate job search, document generation, form submission, and follow-up tracking.
 
-**Status:** Phase 4 complete — Submitter agent fully implemented. ATS detection, conditional docx rendering, Playwright form fill, hard submission gate interrupt, screenshot receipting, and DB persistence. 97/97 tests passing.
+**Status:** Phase 4 complete — Submitter agent fully implemented. ATS detection, conditional docx rendering, Playwright form fill, hard submission gate interrupt, screenshot receipting, and DB persistence. 95/95 tests passing.
 
 ---
 
@@ -74,7 +74,7 @@ fails on platforms where the `playwright` wheel isn't available (Linux x86_64 in
 .venv\Scripts\pytest.exe tests\ -v  # Windows PowerShell (note the & prefix: & .\.venv\Scripts\pytest.exe)
 ```
 
-**Current test count: 97 passing** (11 Phase 0 + 23 Phase 1 + 17 Phase 2 + 13 config CLI + 18 Phase 3 + 15 Phase 4)
+**Current test count: 95 passing** across 8 domain-named test files (see Project structure below).
 
 
 ---
@@ -129,15 +129,18 @@ tests/
     workday_form.html                     # Workday DOM with aria-label fields (Phase 4)
     greenhouse_confirmation.html          # Post-submit success page (Phase 4)
     submission_error.html                 # Generic error page (Phase 4)
-  test_phase0.py     # Graph compilation + state schema smoke tests (11 tests)
-  test_phase1.py     # Discoverer unit tests — fingerprint, dedup, ATS, Send (23 tests)
-  test_phase2.py     # Auth helpers, card parsers, scraper node behavior (17 tests)
-  test_phase3.py     # Writer unit tests — CV loading, gap extraction, prompts, docx, nodes (18 tests)
-  test_phase4.py     # Submitter unit tests — file detection, field mapping, render, routing (15 tests)
-  test_config_cli.py # Config set/read helpers (13 tests)
+  conftest.py        # Shared fixtures: sample_job, resume_content, cover_letter_content, seeded_db
+  test_smoke.py      # Graph compile checks — all four agents (4 tests)
+  test_state.py      # PipelineState schema, enums, empty_state() (7 tests)
+  test_ats.py        # detect_ats() URL fingerprinting (6 tests)
+  test_config.py     # .env read/write helpers (13 tests)
+  test_discoverer.py # Fingerprint, compensation, merge_results, card parsers, auth, scrapers (34 tests)
+  test_writer.py     # CV loading, gap extraction, prompts, parsers, docx rendering, nodes (19 tests)
+  test_submitter.py  # File input detection, field mapping, conditional render, confirmation, routing (13 tests)
 docs/
-  phase2-handoff.md  # Commit plan and architecture decisions for Phase 2
-  phase3-handoff.md  # Commit plan and architecture decisions for Phase 3
+  phase2-handoff.md
+  phase3-handoff.md
+  phase4-handoff.md
 ```
 
 
