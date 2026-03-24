@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     # Writer
     max_revision_rounds: int = 3
 
+    # Candidate identity constants — used by fill_form for ATS text fields
+    # Set these in .env; defaults are illustrative only
+    candidate_first_name: str = "Samuel"
+    candidate_last_name: str = "Montalvo"
+    candidate_email: str = "sammontalvojr@gmail.com"
+    candidate_phone: str = "214-686-7539"
+    candidate_linkedin_url: str = "https://linkedin.com/in/samuel-montalvo-jr/"
+
     # Ghost listing detection
     ghost_threshold_days: int = 14
 

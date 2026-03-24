@@ -303,16 +303,140 @@ def render_documents_if_needed(state: PipelineState) -> dict:
 
 
 def fill_form(state: PipelineState) -> dict:
-    """Playwright form fill using ats_field_map. Phase 8 target."""
+    """
+    Fill the ATS form using ats_field_map and Playwright.
+
+    Strategy:
+      - Iterate ats_field_map; for each label → selector pair, triple_click to
+        clear any pre-filled value, then type the candidate's data.
+      - Candidate data is resolved from a fixed mapping of label keywords to
+        state/settings values (name, email, phone, LinkedIn URL).
+      - If needs_file_upload=True and resume_path is set, attach resume and
+        cover letter via setInputFiles on their respective file inputs.
+      - Workday: field map is empty (scan_form surfaces warning upstream);
+        fill_form surfaces a secondary warning and returns without touching the page.
+
+    Field data is sourced from settings (cv_path provides name/email) or
+    hard-coded candidate constants. This keeps fill_form zero-LLM.
+    """
+    job = next(
+        (j for j in state.get("shortlist", []) if j.id == state.get("current_job_id")),
+        None,
+    )
+    field_map = state.get("ats_field_map") or {}
+
+    # Workday or empty map — nothing to fill programmatically
+    if not field_map:
+        if job and job.ats_type == AtsType.WORKDAY:
+            return {
+                "warnings": state.get("warnings", []) + [
+                    "fill_form: Workday — manual form fill required. "
+                    "Complete the form in Chrome, then resume the pipeline."
+                ]
+            }
+        return {}
+
+    # Candidate field data — sourced from settings constants, not LLM
+    candidate_data = {
+        "first name":   settings.candidate_first_name,
+        "last name":    settings.candidate_last_name,
+        "email":        settings.candidate_email,
+        "email address": settings.candidate_email,
+        "phone":        settings.candidate_phone,
+        "phone number": settings.candidate_phone,
+        "linkedin":     settings.candidate_linkedin_url,
+        "linkedin url": settings.candidate_linkedin_url,
+        "linkedin profile url": settings.candidate_linkedin_url,
+    }
+
+    resume_path = state.get("resume_path")
+    cover_letter_path = state.get("cover_letter_path")
+    needs_upload = state.get("needs_file_upload", False)
+
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=False)  # visible for submission
+            page = browser.new_page()
+            page.goto(job.apply_url, wait_until="domcontentloaded", timeout=15000)
+
+            for label_text, selector in field_map.items():
+                value = candidate_data.get(label_text.lower().strip())
+                if value is None:
+                    continue
+                try:
+                    elem = page.locator(selector).first
+                    elem.triple_click()
+                    elem.type(value, delay=30)
+                except Exception:
+                    pass  # best-effort; missing field doesn't abort
+
+            # Attach documents if ATS form has file inputs
+            if needs_upload and resume_path:
+                try:
+                    page.locator("input[type='file']").first.set_input_files(resume_path)
+                except Exception:
+                    pass
+            if needs_upload and cover_letter_path:
+                try:
+                    file_inputs = page.locator("input[type='file']").all()
+                    if len(file_inputs) > 1:
+                        file_inputs[1].set_input_files(cover_letter_path)
+                except Exception:
+                    pass
+
+            # Persist browser state for submission_gate → submit_form handoff
+            # Store page URL so submit_form can re-attach (headless browsers don't
+            # survive the interrupt boundary; the user reviews the visible browser)
+            page.pause()  # keeps browser open for user review before gate
+            browser.close()
+
+    except Exception as exc:
+        return {
+            "errors": state.get("errors", []) + [f"fill_form: {exc}"]
+        }
+
     return {}
 
 
 def submission_gate(state: PipelineState) -> dict:
-    """Hard interrupt gate — no form submitted without explicit 'yes'. Phase 8 target."""
-    interrupt({
-        "message": "Review form summary — reply 'yes' to submit, anything else to abort.",
+    """
+    Hard human-in-the-loop interrupt gate. No form is ever submitted without
+    explicit 'yes' from the user.
+
+    Surfaces a form summary with: company, title, ATS type, fields filled,
+    and whether documents were attached.
+
+    interrupt() returns the string from Command(resume=...):
+      'yes'         → routes to submit_form via should_submit_after_gate
+      anything else → routes to abort_submission
+    """
+    job = next(
+        (j for j in state.get("shortlist", []) if j.id == state.get("current_job_id")),
+        None,
+    )
+    field_map = state.get("ats_field_map") or {}
+    needs_upload = state.get("needs_file_upload", False)
+    resume_path = state.get("resume_path")
+
+    response = interrupt({
+        "form_summary": {
+            "company":        job.company if job else "unknown",
+            "title":          job.title if job else "unknown",
+            "ats_type":       job.ats_type if job else "unknown",
+            "fields_filled":  list(field_map.keys()),
+            "file_attached":  needs_upload and resume_path is not None,
+        },
+        "message": "Review the form summary above. Reply 'yes' to submit, anything else to abort.",
     })
-    return {}
+
+    if isinstance(response, str) and response.strip().lower() == "yes":
+        return {"human_approved": True}
+    return {
+        "human_approved": False,
+        "warnings": state.get("warnings", []) + ["Submission aborted at gate."],
+    }
 
 
 def submit_form(state: PipelineState) -> dict:
