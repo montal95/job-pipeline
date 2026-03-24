@@ -349,17 +349,71 @@ def pre_write_interview(state: PipelineState) -> dict:
 def write_resume(state: PipelineState) -> dict:
     """
     LLM call (Anthropic API): generate resume content as structured JSON,
-    then render to .docx. Commit 6 target.
+    then render immediately to .docx. One call per round.
+
+    Rendering happens here rather than in the separate render_resume_docx node
+    so that the revision loop (apply_feedback → write_resume) re-renders in
+    a single step without an extra node hop.
     """
-    return {"resume_path": None}
+    job = next(
+        (j for j in state.get("shortlist", []) if j.id == state.get("current_job_id")),
+        None,
+    )
+    if job is None:
+        return {"errors": state.get("errors", []) + ["write_resume: job not found in shortlist"]}
+
+    cv_text = state.get("cv_text") or ""
+    answers = state.get("interview_answers") or {}
+
+    prompt = _build_resume_prompt(cv_text, job, answers)
+
+    client = anthropic.Anthropic()
+    message = client.messages.create(
+        model=LLM_MODEL,
+        max_tokens=4096,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    raw = message.content[0].text
+    content = _parse_resume_json(raw)
+
+    output_dir = str(settings.output_dir)
+    output_path = f"{output_dir}/{job.id}_resume.docx"
+    _render_resume_docx(content, output_path)
+
+    return {"resume_content": content, "resume_path": output_path}
 
 
 def write_cover_letter(state: PipelineState) -> dict:
     """
     LLM call (Anthropic API): generate cover letter content as structured JSON,
-    then render to .docx. Commit 6 target.
+    then render immediately to .docx.
     """
-    return {"cover_letter_path": None}
+    job = next(
+        (j for j in state.get("shortlist", []) if j.id == state.get("current_job_id")),
+        None,
+    )
+    if job is None:
+        return {"errors": state.get("errors", []) + ["write_cover_letter: job not found in shortlist"]}
+
+    cv_text = state.get("cv_text") or ""
+    answers = state.get("interview_answers") or {}
+
+    prompt = _build_cover_letter_prompt(cv_text, job, answers)
+
+    client = anthropic.Anthropic()
+    message = client.messages.create(
+        model=LLM_MODEL,
+        max_tokens=2048,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    raw = message.content[0].text
+    content = _parse_cover_letter_json(raw)
+
+    output_dir = str(settings.output_dir)
+    output_path = f"{output_dir}/{job.id}_cover_letter.docx"
+    _render_cover_letter_docx(content, output_path)
+
+    return {"cover_letter_content": content, "cover_letter_path": output_path}
 
 
 def render_resume_docx(state: PipelineState) -> dict:
@@ -383,10 +437,47 @@ def review_interrupt(state: PipelineState) -> dict:
 
 def apply_feedback(state: PipelineState) -> dict:
     """
-    Targeted LLM call to apply user feedback. Increments revision_round.
-    Commit 6 target.
+    Targeted LLM call to revise resume based on user feedback.
+    Passes the previous resume JSON + feedback as a revision prompt —
+    cheaper and more accurate than full regeneration.
+    Increments revision_round. Re-renders both docs.
     """
-    return {"revision_round": state.get("revision_round", 0) + 1}
+    job = next(
+        (j for j in state.get("shortlist", []) if j.id == state.get("current_job_id")),
+        None,
+    )
+    feedback = state.get("human_feedback") or ""
+    prev_content = state.get("resume_content")
+    prev_json = prev_content.model_dump_json() if prev_content else "{}"
+
+    revision_prompt = (
+        f"The candidate has reviewed their tailored resume and provided this feedback:\n\n"
+        f"FEEDBACK: {feedback}\n\n"
+        f"Here is the current resume JSON:\n{prev_json}\n\n"
+        "Apply the feedback and return ONLY an updated JSON object with the same schema. "
+        "No preamble, no markdown fences."
+    )
+
+    client = anthropic.Anthropic()
+    message = client.messages.create(
+        model=LLM_MODEL,
+        max_tokens=4096,
+        messages=[{"role": "user", "content": revision_prompt}],
+    )
+    raw = message.content[0].text
+    content = _parse_resume_json(raw)
+
+    output_dir = str(settings.output_dir)
+    job_id = state.get("current_job_id", "unknown")
+    resume_path = f"{output_dir}/{job_id}_resume.docx"
+    _render_resume_docx(content, resume_path)
+
+    return {
+        "resume_content": content,
+        "resume_path": resume_path,
+        "revision_round": state.get("revision_round", 0) + 1,
+        "human_feedback": None,  # clear feedback after applying
+    }
 
 
 def persist_documents(state: PipelineState) -> dict:
