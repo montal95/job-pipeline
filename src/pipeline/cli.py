@@ -316,6 +316,51 @@ async def _discover(query: str, location: str, remote: bool, sources: str):
         console.print("[bold green]✓ Discovery complete.[/bold green]")
 
 
+# ── Write UI helpers ───────────────────────────────────────────────────────────
+
+
+def _collect_interview_answers(interrupt_val: dict) -> dict:
+    """
+    Present gap questions to the user and collect answers.
+    Returns a dict mapping question text → answer string.
+    """
+    questions: list[str] = interrupt_val.get("questions", [])
+    gaps: list[str] = interrupt_val.get("gaps", [])
+
+    if not questions:
+        console.print("[dim]No gaps found — proceeding with document generation.[/dim]")
+        return {}
+
+    console.print(f"\n[bold yellow]Pre-write interview[/bold yellow] — {len(gaps)} gap(s) identified\n")
+    answers: dict[str, str] = {}
+    for i, question in enumerate(questions, start=1):
+        console.print(f"  [cyan][{i}][/cyan] {question}")
+        answer = console.input("  → ").strip()
+        answers[question] = answer
+
+    console.print()
+    return answers
+
+
+def _collect_review_decision(interrupt_val: dict) -> str:
+    """
+    Show generated doc paths and prompt the user to approve, abort, or provide feedback.
+    Returns "approve", "abort", or a feedback string.
+    """
+    resume_path = interrupt_val.get("resume_path")
+    cl_path = interrupt_val.get("cover_letter_path")
+
+    console.print("\n[bold]Documents ready for review:[/bold]")
+    console.print(f"  Resume:       [cyan]{resume_path or 'not found'}[/cyan]")
+    console.print(f"  Cover letter: [cyan]{cl_path or 'not found'}[/cyan]")
+    console.print("\n  [green]approve[/green] — submit as-is")
+    console.print("  [red]abort[/red]   — discard and exit")
+    console.print("  [dim]<feedback>[/dim] — type feedback to revise\n")
+
+    decision = console.input("  Decision: ").strip()
+    return decision if decision else "approve"
+
+
 # ── Write ──────────────────────────────────────────────────────────────────────
 
 
@@ -328,16 +373,72 @@ def write(
 
 
 async def _write(job_id: str):
-    from pipeline.graph import build_pipeline
+    from pathlib import Path
+
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    from langgraph.errors import GraphInterrupt
+    from langgraph.types import Command
+
+    from pipeline.agents.writer import build_writer_graph
     from pipeline.state import empty_state
+
     thread_id = f"write-{job_id}"
-    console.print(f"[bold blue]Writer[/bold blue] — job: {job_id} | thread: {thread_id}")
-    graph = await build_pipeline(thread_id)
-    initial = empty_state()
-    initial["current_job_id"] = job_id
+    checkpointer_path = "./data/checkpoints.db"
+    Path(checkpointer_path).parent.mkdir(parents=True, exist_ok=True)
+
+    console.print(f"[bold blue]Writer[/bold blue] — job: {job_id} | thread: [dim]{thread_id}[/dim]")
+
     config = {"configurable": {"thread_id": thread_id}}
-    await graph.ainvoke(initial, config=config)
-    console.print("[dim]Writer run complete (Phase 3 target)[/dim]")
+
+    async with await AsyncSqliteSaver.from_conn_string(checkpointer_path) as checkpointer:
+        graph = build_writer_graph().compile(checkpointer=checkpointer)
+
+        initial = empty_state()
+        initial["current_job_id"] = job_id
+
+        # First invoke — runs load_job → fetch_cv → research_company
+        # then hits pre_write_interview interrupt
+        try:
+            await graph.ainvoke(initial, config=config)
+        except GraphInterrupt:
+            pass
+
+        # Drive the graph through all interrupt gates
+        while True:
+            snap = await graph.aget_state(config)
+
+            if not snap.next:
+                console.print("[bold green]✓ Documents saved.[/bold green]")
+                break
+
+            # Extract the interrupt value from the paused task
+            interrupt_data: dict = {}
+            if snap.tasks and snap.tasks[0].interrupts:
+                interrupt_data = snap.tasks[0].interrupts[0].value or {}
+
+            if "questions" in interrupt_data:
+                # pre_write_interview gate
+                answers = _collect_interview_answers(interrupt_data)
+                try:
+                    await graph.ainvoke(Command(resume=answers), config=config)
+                except GraphInterrupt:
+                    pass
+
+            elif "resume_path" in interrupt_data:
+                # review_interrupt gate
+                decision = _collect_review_decision(interrupt_data)
+                if decision.strip().lower() == "abort":
+                    console.print("[yellow]Application aborted.[/yellow]")
+                    break
+                try:
+                    await graph.ainvoke(Command(resume=decision), config=config)
+                except GraphInterrupt:
+                    pass
+
+            else:
+                # Unknown interrupt or graph in unexpected state — exit safely
+                console.print(f"[dim]Graph paused at: {snap.next} — exiting.[/dim]")
+                break
 
 
 # ── Submit ─────────────────────────────────────────────────────────────────────

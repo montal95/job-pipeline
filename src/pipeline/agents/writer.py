@@ -339,11 +339,34 @@ def research_company(state: PipelineState) -> dict:
 
 def pre_write_interview(state: PipelineState) -> dict:
     """
-    Human-in-the-loop gate: present gap analysis between CV and JD,
-    ask targeted questions, wait for answers. Commit 7 target.
+    Human-in-the-loop gate: extract gaps between CV and JD, surface targeted
+    questions, wait for user answers before document generation begins.
+
+    interrupt() returns the answers dict supplied by Command(resume=...).
     """
-    interrupt("Answer pre-write questions before document generation begins")
-    return {}
+    job = next(
+        (j for j in state.get("shortlist", []) if j.id == state.get("current_job_id")),
+        None,
+    )
+    cv_text = state.get("cv_text") or ""
+
+    gaps: list[str] = []
+    if job and job.description:
+        gaps = _extract_job_gaps(cv_text, job.description)
+
+    # Build one targeted question per gap (cap at 5 to keep the interview short)
+    questions = [
+        f"The JD mentions '{g}' — describe any experience you have with this, or press Enter to skip."
+        for g in gaps[:5]
+    ]
+
+    answers = interrupt({
+        "gaps": gaps,
+        "questions": questions,
+        "message": "Answer the following before document generation begins.",
+    })
+
+    return {"interview_answers": answers if isinstance(answers, dict) else {}}
 
 
 def write_resume(state: PipelineState) -> dict:
@@ -428,11 +451,30 @@ def render_cover_letter_docx(state: PipelineState) -> dict:
 
 def review_interrupt(state: PipelineState) -> dict:
     """
-    Human-in-the-loop gate: show doc paths, ask for feedback or approval.
-    Commit 7 target.
+    Human-in-the-loop gate: show generated doc paths, wait for the user to
+    approve, provide feedback, or abort.
+
+    interrupt() returns the string supplied by Command(resume=...):
+      "approve" or None → persist_documents
+      "abort"           → exits with a warning (handled by CLI)
+      any other string  → stored as human_feedback → routes to apply_feedback
     """
-    interrupt("Review generated documents — approve, provide feedback, or abort")
-    return {}
+    feedback = interrupt({
+        "resume_path": state.get("resume_path"),
+        "cover_letter_path": state.get("cover_letter_path"),
+        "message": "Review documents. Reply: 'approve', 'abort', or type feedback.",
+    })
+
+    if feedback is None or str(feedback).strip().lower() == "approve":
+        return {"human_feedback": None, "human_approved": True}
+    elif str(feedback).strip().lower() == "abort":
+        return {
+            "human_feedback": None,
+            "human_approved": False,
+            "warnings": state.get("warnings", []) + ["Application aborted by user at review gate."],
+        }
+    else:
+        return {"human_feedback": str(feedback), "human_approved": False}
 
 
 def apply_feedback(state: PipelineState) -> dict:
