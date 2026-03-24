@@ -12,12 +12,20 @@ Usage (after `uv pip install -e .`):
   pipeline track
   pipeline run
   pipeline db migrate
+  pipeline config set ANTHROPIC_API_KEY sk-ant-...
+  pipeline config edit
+  pipeline config show
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
+import re
+import subprocess
+import sys
 from datetime import datetime
+from pathlib import Path
 from uuid import uuid4
 
 import typer
@@ -34,10 +42,143 @@ app = typer.Typer(
 db_app = typer.Typer(help="Database management commands.")
 app.add_typer(db_app, name="db")
 
+config_app = typer.Typer(help="Configure pipeline settings (.env).")
+app.add_typer(config_app, name="config")
+
 
 def run(coro):
     """Convenience wrapper to run an async function from a sync typer command."""
     return asyncio.run(coro)
+
+
+# ── Config helpers (pure — unit testable) ────────────────────────────────────
+
+# Sentinel used to distinguish "key not present" from "key present but empty"
+_MISSING = object()
+
+# Keys whose values are masked in `pipeline config show`
+_SECRET_KEYS = {"ANTHROPIC_API_KEY"}
+
+
+def _find_env_path() -> Path:
+    """Return the .env path relative to the project root (two levels up from this file)."""
+    return Path(__file__).parent.parent.parent / ".env"
+
+
+def _read_env_keys(env_path: Path) -> dict[str, str]:
+    """
+    Parse a .env file into a dict. Skips blank lines and comments.
+    Values may be optionally quoted — quotes are stripped.
+    """
+    if not env_path.exists():
+        return {}
+    result: dict[str, str] = {}
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        result[key] = value
+    return result
+
+
+def _set_env_key(key: str, value: str, env_path: Path) -> None:
+    """
+    Write or update KEY=VALUE in a .env file.
+    - If the key already exists on any line, that line is replaced in place.
+    - If the key is absent, it is appended.
+    - If the file doesn't exist, it is created.
+    Preserves all other lines (comments, blank lines, other keys) exactly.
+    """
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+    lines = existing.splitlines(keepends=True)
+
+    pattern = re.compile(rf"^{re.escape(key)}\s*=", re.IGNORECASE)
+    replaced = False
+    new_lines: list[str] = []
+
+    for line in lines:
+        if pattern.match(line):
+            new_lines.append(f"{key}={value}\n")
+            replaced = True
+        else:
+            new_lines.append(line)
+
+    if not replaced:
+        # Ensure file ends with a newline before appending
+        if new_lines and not new_lines[-1].endswith("\n"):
+            new_lines.append("\n")
+        new_lines.append(f"{key}={value}\n")
+
+    env_path.write_text("".join(new_lines), encoding="utf-8")
+
+
+# ── Config commands ────────────────────────────────────────────────────────────
+
+
+@config_app.command("set")
+def config_set(
+    key: str = typer.Argument(..., help="Environment variable name (e.g. ANTHROPIC_API_KEY)"),
+    value: str = typer.Argument(..., help="Value to set"),
+    env_file: str = typer.Option("", "--env-file", help="Path to .env file (default: project root .env)"),
+):
+    """Set a key in the .env file. Creates the file if it doesn't exist."""
+    env_path = Path(env_file) if env_file else _find_env_path()
+    _set_env_key(key.upper(), value, env_path)
+    display_value = "***" if key.upper() in _SECRET_KEYS else value
+    console.print(f"[green]✓[/green] {key.upper()}={display_value} written to [dim]{env_path}[/dim]")
+
+
+@config_app.command("edit")
+def config_edit(
+    env_file: str = typer.Option("", "--env-file", help="Path to .env file (default: project root .env)"),
+):
+    """Open the .env file in your system editor (notepad on Windows, $EDITOR/nano on Linux)."""
+    env_path = Path(env_file) if env_file else _find_env_path()
+    if not env_path.exists():
+        console.print(f"[yellow].env not found at {env_path} — creating from .env.example[/yellow]")
+        example = env_path.parent / ".env.example"
+        if example.exists():
+            env_path.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+        else:
+            env_path.touch()
+
+    if sys.platform == "win32":
+        editor = os.environ.get("EDITOR", "notepad")
+    else:
+        editor = os.environ.get("EDITOR", "nano")
+
+    console.print(f"[dim]Opening {env_path} with {editor}...[/dim]")
+    subprocess.run([editor, str(env_path)])
+
+
+@config_app.command("show")
+def config_show(
+    env_file: str = typer.Option("", "--env-file", help="Path to .env file (default: project root .env)"),
+):
+    """Show current .env values. Secret keys are masked."""
+    env_path = Path(env_file) if env_file else _find_env_path()
+    keys = _read_env_keys(env_path)
+
+    if not keys:
+        console.print(f"[yellow]No .env found at {env_path} or file is empty.[/yellow]")
+        console.print("Run [bold]pipeline config set ANTHROPIC_API_KEY <your-key>[/bold] to get started.")
+        return
+
+    table = Table(title=f".env — {env_path}", box=box.ROUNDED, show_lines=False)
+    table.add_column("Key", style="cyan", no_wrap=True)
+    table.add_column("Value", style="white")
+
+    for k, v in sorted(keys.items()):
+        display = "***" if k in _SECRET_KEYS else v
+        table.add_row(k, display)
+
+    console.print(table)
 
 
 # ── Triage UI helpers ──────────────────────────────────────────────────────────
