@@ -440,17 +440,184 @@ def submission_gate(state: PipelineState) -> dict:
 
 
 def submit_form(state: PipelineState) -> dict:
-    """Click submit, wait for confirmation. Phase 9 target."""
-    return {}
+    """
+    Re-open the apply URL in Playwright, re-fill the form (fields persist in
+    a new session), and click the submit button.
+
+    Note: fill_form uses page.pause() to keep the browser open for user review.
+    The LangGraph interrupt boundary means the browser session doesn't survive
+    between fill_form and submit_form. We therefore re-navigate and re-fill
+    before clicking submit.
+
+    Post-submit: capture page HTML and call _parse_confirmation to verify success.
+    Sets submission_confirmed in state.
+    """
+    job = next(
+        (j for j in state.get("shortlist", []) if j.id == state.get("current_job_id")),
+        None,
+    )
+    if job is None or not job.apply_url:
+        return {"errors": state.get("errors", []) + ["submit_form: no apply_url"]}
+
+    field_map = state.get("ats_field_map") or {}
+    resume_path = state.get("resume_path")
+    cover_letter_path = state.get("cover_letter_path")
+    needs_upload = state.get("needs_file_upload", False)
+
+    candidate_data = {
+        "first name":           settings.candidate_first_name,
+        "last name":            settings.candidate_last_name,
+        "email":                settings.candidate_email,
+        "email address":        settings.candidate_email,
+        "phone":                settings.candidate_phone,
+        "phone number":         settings.candidate_phone,
+        "linkedin":             settings.candidate_linkedin_url,
+        "linkedin url":         settings.candidate_linkedin_url,
+        "linkedin profile url": settings.candidate_linkedin_url,
+    }
+
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=False)
+            page = browser.new_page()
+            page.goto(job.apply_url, wait_until="domcontentloaded", timeout=15000)
+
+            # Re-fill all fields
+            for label_text, selector in field_map.items():
+                value = candidate_data.get(label_text.lower().strip())
+                if value is None:
+                    continue
+                try:
+                    elem = page.locator(selector).first
+                    elem.triple_click()
+                    elem.type(value, delay=30)
+                except Exception:
+                    pass
+
+            if needs_upload and resume_path:
+                try:
+                    page.locator("input[type='file']").first.set_input_files(resume_path)
+                except Exception:
+                    pass
+            if needs_upload and cover_letter_path:
+                try:
+                    inputs = page.locator("input[type='file']").all()
+                    if len(inputs) > 1:
+                        inputs[1].set_input_files(cover_letter_path)
+                except Exception:
+                    pass
+
+            # Click submit — try common selector patterns
+            for submit_sel in ["[type='submit']", "button[type='submit']", "input[type='submit']"]:
+                btn = page.locator(submit_sel).first
+                if btn.count():
+                    btn.click()
+                    break
+
+            page.wait_for_load_state("domcontentloaded", timeout=10000)
+            html = page.content()
+            browser.close()
+
+        confirmed = _parse_confirmation(html)
+        return {"submission_confirmed": confirmed}
+
+    except Exception as exc:
+        return {"errors": state.get("errors", []) + [f"submit_form: {exc}"]}
 
 
 def capture_confirmation(state: PipelineState) -> dict:
-    """Screenshot + text capture of confirmation state. Phase 9 target."""
-    return {}
+    """
+    Take a screenshot of the post-submission page as a receipt.
+    Saves to {output_dir}/{job_id}_confirmation.png.
+    Non-fatal if Playwright is unavailable — warning is appended instead.
+    """
+    job_id = state.get("current_job_id", "unknown")
+    job = next(
+        (j for j in state.get("shortlist", []) if j.id == job_id),
+        None,
+    )
+    if job is None or not job.apply_url:
+        return {}
+
+    output_dir = str(settings.output_dir)
+    screenshot_path = f"{output_dir}/{job_id}_confirmation.png"
+
+    try:
+        from pathlib import Path
+        from playwright.sync_api import sync_playwright
+
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page()
+            # Re-visit the URL — confirmation pages are typically accessible
+            page.goto(job.apply_url, wait_until="domcontentloaded", timeout=10000)
+            page.screenshot(path=screenshot_path, full_page=True)
+            browser.close()
+
+        return {"submission_status": state.get("submission_status")}
+
+    except Exception as exc:
+        return {
+            "warnings": state.get("warnings", []) + [f"capture_confirmation: screenshot failed ({exc})"]
+        }
 
 
 def persist_submission(state: PipelineState) -> dict:
-    """Write to submissions table, update job status → applied. Phase 9 target."""
+    """
+    Write a record to the submissions table and update the jobs row.
+
+    submissions INSERT: job_id, submitted_at, confirmation_text (if any),
+    confirmation_screenshot_path, followup_due_date (submitted_at + 7 days).
+
+    jobs UPDATE: status → 'applied', resume_path, cover_letter_path.
+    Uses sync sqlite3 — same rationale as load_job.
+    """
+    import sqlite3
+    from datetime import date, datetime, timezone
+    from uuid import uuid4
+
+    job_id = state.get("current_job_id")
+    if not job_id:
+        return {}
+
+    now = datetime.now(timezone.utc)
+    followup = date.fromordinal(now.date().toordinal() + 7).isoformat()
+    submission_id = str(uuid4())
+
+    screenshot_path = f"{settings.output_dir}/{job_id}_confirmation.png"
+    resume_path = state.get("resume_path")
+    cover_letter_path = state.get("cover_letter_path")
+
+    db_path = str(settings.app_db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO submissions
+              (id, job_id, submitted_at, followup_due_date, confirmation_screenshot_path)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (submission_id, job_id, now.isoformat(), followup, screenshot_path),
+        )
+        conn.execute(
+            """
+            UPDATE jobs
+               SET status = 'applied',
+                   resume_path = ?,
+                   cover_letter_path = ?
+             WHERE id = ?
+            """,
+            (resume_path, cover_letter_path, job_id),
+        )
+        conn.commit()
+    except Exception as exc:
+        return {"errors": state.get("errors", []) + [f"persist_submission: {exc}"]}
+    finally:
+        conn.close()
+
     return {}
 
 

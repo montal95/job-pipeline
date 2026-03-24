@@ -453,16 +453,80 @@ def submit(
 
 
 async def _submit(job_id: str):
-    from pipeline.graph import build_pipeline
+    from pathlib import Path
+
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    from langgraph.errors import GraphInterrupt
+    from langgraph.types import Command
+
+    from pipeline.agents.submitter import build_submitter_graph
     from pipeline.state import empty_state
+
     thread_id = f"submit-{job_id}"
-    console.print(f"[bold yellow]Submitter[/bold yellow] — job: {job_id} | thread: {thread_id}")
-    graph = await build_pipeline(thread_id)
-    initial = empty_state()
-    initial["current_job_id"] = job_id
+    checkpointer_path = "./data/checkpoints.db"
+    Path(checkpointer_path).parent.mkdir(parents=True, exist_ok=True)
+
+    console.print(f"[bold yellow]Submitter[/bold yellow] — job: {job_id} | thread: [dim]{thread_id}[/dim]")
+
     config = {"configurable": {"thread_id": thread_id}}
-    await graph.ainvoke(initial, config=config)
-    console.print("[dim]Submitter run complete (Phase 4 target)[/dim]")
+
+    async with await AsyncSqliteSaver.from_conn_string(checkpointer_path) as checkpointer:
+        graph = build_submitter_graph().compile(checkpointer=checkpointer)
+
+        initial = empty_state()
+        initial["current_job_id"] = job_id
+
+        try:
+            await graph.ainvoke(initial, config=config)
+        except GraphInterrupt:
+            pass
+
+        while True:
+            snap = await graph.aget_state(config)
+
+            if not snap.next:
+                # Check final state for warnings/errors
+                final = snap.values
+                for w in final.get("warnings", []):
+                    console.print(f"[yellow]⚠ {w}[/yellow]")
+                if final.get("errors"):
+                    for e in final.get("errors", []):
+                        console.print(f"[red]✗ {e}[/red]")
+                elif final.get("submission_confirmed"):
+                    console.print("[bold green]✓ Application submitted and confirmed.[/bold green]")
+                else:
+                    console.print("[dim]Submitter run complete.[/dim]")
+                break
+
+            interrupt_data: dict = {}
+            if snap.tasks and snap.tasks[0].interrupts:
+                interrupt_data = snap.tasks[0].interrupts[0].value or {}
+
+            if "form_summary" in interrupt_data:
+                # submission_gate — show summary, collect yes/no
+                summary = interrupt_data["form_summary"]
+                table = Table(title="Form Summary", box=box.SIMPLE)
+                table.add_column("Field", style="dim")
+                table.add_column("Value")
+                table.add_row("Company", summary.get("company", ""))
+                table.add_row("Role", summary.get("title", ""))
+                table.add_row("ATS", str(summary.get("ats_type", "")))
+                table.add_row("Fields filled", ", ".join(summary.get("fields_filled", [])) or "none")
+                table.add_row("File attached", "yes" if summary.get("file_attached") else "no")
+                console.print(table)
+
+                decision = typer.prompt(
+                    "Submit this application? (yes / abort)",
+                    default="abort",
+                ).strip().lower()
+                try:
+                    await graph.ainvoke(Command(resume=decision), config=config)
+                except GraphInterrupt:
+                    pass
+
+            else:
+                console.print(f"[dim]Graph paused at: {snap.next} — exiting.[/dim]")
+                break
 
 
 # ── Track ──────────────────────────────────────────────────────────────────────
