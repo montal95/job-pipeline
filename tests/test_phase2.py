@@ -167,3 +167,78 @@ async def test_scrape_ziprecruiter_missing_auth_returns_empty(monkeypatch, tmp_p
     state["search_params"] = SearchParams(query="engineer", location="Chicago, IL")
     result = await disc.scrape_ziprecruiter(state)
     assert result == {"raw_results": []}
+
+
+# ── Scraper node behavior — stale session ─────────────────────────────────────
+
+
+class _FakePage:
+    """Minimal Playwright page mock that simulates a login redirect."""
+    def __init__(self, redirect_url: str, html: str = "<html></html>"):
+        self.url = redirect_url
+        self._html = html
+
+    async def goto(self, url, **kwargs): pass
+    async def wait_for_selector(self, *a, **kw): pass
+    async def content(self): return self._html
+
+
+class _FakeContext:
+    def __init__(self, page): self._page = page
+    async def new_page(self): return self._page
+    async def close(self): pass
+
+
+class _FakeBrowser:
+    def __init__(self, page): self._page = page
+    async def new_context(self, **kwargs): return _FakeContext(self._page)
+    async def close(self): pass
+
+
+class _FakePlaywright:
+    def __init__(self, page):
+        self.chromium = _FakeChromium(page)
+
+    async def __aenter__(self): return self
+    async def __aexit__(self, *a): pass
+
+
+class _FakeChromium:
+    def __init__(self, page): self._page = page
+    async def launch(self, **kwargs): return _FakeBrowser(self._page)
+
+
+@pytest.mark.asyncio
+async def test_scrape_linkedin_stale_session_returns_empty(monkeypatch, tmp_path):
+    import pipeline.agents.discoverer as disc
+
+    # Create a dummy auth file so the existence check passes
+    auth_file = tmp_path / "linkedin.json"
+    auth_file.write_text("{}")
+    monkeypatch.setattr(disc, "_get_auth_path", lambda p: auth_file)
+
+    # Simulate Playwright landing on the login page (stale session)
+    stale_page = _FakePage(redirect_url="https://www.linkedin.com/login")
+    monkeypatch.setattr(disc, "async_playwright", lambda: _FakePlaywright(stale_page))
+
+    state = empty_state()
+    state["search_params"] = SearchParams(query="engineer", location="Chicago, IL")
+    result = await disc.scrape_linkedin(state)
+    assert result == {"raw_results": []}
+
+
+@pytest.mark.asyncio
+async def test_scrape_ziprecruiter_stale_session_returns_empty(monkeypatch, tmp_path):
+    import pipeline.agents.discoverer as disc
+
+    auth_file = tmp_path / "ziprecruiter.json"
+    auth_file.write_text("{}")
+    monkeypatch.setattr(disc, "_get_auth_path", lambda p: auth_file)
+
+    stale_page = _FakePage(redirect_url="https://www.ziprecruiter.com/login")
+    monkeypatch.setattr(disc, "async_playwright", lambda: _FakePlaywright(stale_page))
+
+    state = empty_state()
+    state["search_params"] = SearchParams(query="engineer", location="Chicago, IL")
+    result = await disc.scrape_ziprecruiter(state)
+    assert result == {"raw_results": []}
