@@ -40,6 +40,7 @@ from rich.console import Console
 from rich.table import Table
 from rich import box
 
+from pipeline.ats import ATS_PATTERNS, detect_ats
 from pipeline.database import get_connection
 from pipeline.state import (
     AtsType,
@@ -75,15 +76,6 @@ HEADERS = {
     "Upgrade-Insecure-Requests": "1",
 }
 
-# ── ATS fingerprinting ─────────────────────────────────────────────────────────
-
-ATS_PATTERNS: dict[str, list[str]] = {
-    "greenhouse": ["greenhouse.io", "boards.greenhouse.io"],
-    "workday": ["workday.com", "myworkdayjobs.com"],
-    "ashby": ["ashbyhq.com", "jobs.ashby"],
-    "linkedin": ["linkedin.com/jobs"],
-}
-
 # ── Auth paths ─────────────────────────────────────────────────────────────────
 
 AUTH_DIR = Path(__file__).parent.parent.parent.parent / "playwright" / ".auth"
@@ -95,16 +87,6 @@ LOGIN_PATTERNS: dict[str, list[str]] = {
 
 
 # ── Pure helper functions ──────────────────────────────────────────────────────
-
-
-def _detect_ats(url: str | None) -> AtsType:
-    if not url:
-        return AtsType.UNKNOWN
-    url_lower = url.lower()
-    for ats, patterns in ATS_PATTERNS.items():
-        if any(p in url_lower for p in patterns):
-            return AtsType(ats)
-    return AtsType.OTHER
 
 
 def _make_fingerprint(company: str, title: str, location: str) -> str:
@@ -479,7 +461,7 @@ async def merge_results(state: PipelineState) -> dict:
         prior = previously_seen.get(fp)
         if prior in suppress:
             continue
-        job = JobListing(**raw_listing.model_dump(), fingerprint=fp, ats_type=_detect_ats(raw_listing.apply_url))
+        job = JobListing(**raw_listing.model_dump(), fingerprint=fp, ats_type=detect_ats(raw_listing.apply_url))
         if prior in (JobStatus.QUEUED, JobStatus.DOCS_DRAFT, JobStatus.DOCS_READY):
             job.notes = f"[previously seen — status: {prior.value}]"
         shortlist.append(job)

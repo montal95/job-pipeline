@@ -27,8 +27,8 @@ from pipeline.state import (
     WorkplaceType,
     empty_state,
 )
+from pipeline.ats import detect_ats
 from pipeline.agents.discoverer import (
-    _detect_ats,
     _make_fingerprint,
     _parse_compensation,
     fan_out_sources,
@@ -115,27 +115,27 @@ def test_parse_compensation_single_k():
 
 
 def test_detect_ats_greenhouse():
-    assert _detect_ats("https://boards.greenhouse.io/acme/jobs/1") == AtsType.GREENHOUSE
+    assert detect_ats("https://boards.greenhouse.io/acme/jobs/1") == AtsType.GREENHOUSE
 
 
 def test_detect_ats_workday():
-    assert _detect_ats("https://acme.myworkdayjobs.com/en-US/jobs/1") == AtsType.WORKDAY
+    assert detect_ats("https://acme.myworkdayjobs.com/en-US/jobs/1") == AtsType.WORKDAY
 
 
 def test_detect_ats_ashby():
-    assert _detect_ats("https://jobs.ashby.io/acme/apply") == AtsType.ASHBY
+    assert detect_ats("https://jobs.ashby.io/acme/apply") == AtsType.ASHBY
 
 
 def test_detect_ats_linkedin():
-    assert _detect_ats("https://www.linkedin.com/jobs/view/12345") == AtsType.LINKEDIN
+    assert detect_ats("https://www.linkedin.com/jobs/view/12345") == AtsType.LINKEDIN
 
 
 def test_detect_ats_unknown_url():
-    assert _detect_ats("https://careers.somecompany.com/apply") == AtsType.OTHER
+    assert detect_ats("https://careers.somecompany.com/apply") == AtsType.OTHER
 
 
 def test_detect_ats_none():
-    assert _detect_ats(None) == AtsType.UNKNOWN
+    assert detect_ats(None) == AtsType.UNKNOWN
 
 
 # ── parse_search_params node ───────────────────────────────────────────────────
