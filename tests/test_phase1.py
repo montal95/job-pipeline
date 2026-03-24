@@ -246,47 +246,6 @@ async def test_merge_results_suppresses_skipped(monkeypatch):
     )
 
     async def mock_get_connection():
-        class FakeCursor:
-            def __aiter__(self):
-                return iter([{"fingerprint": skipped_fp, "status": "skipped"}])
-        class FakeConn:
-            async def __aenter__(self): return self
-            async def __aexit__(self, *a): pass
-            async def execute(self, *a, **kw): return FakeCursor()
-        return FakeConn()
-
-    monkeypatch.setattr(disc, "get_connection", mock_get_connection)
-
-    state = empty_state()
-    state["raw_results"] = INDEED_FIXTURES  # type: ignore[assignment]
-    result = await disc.merge_results(state)
-    titles = [j.title for j in result["shortlist"]]
-    assert "Senior Software Engineer" not in titles
-
-
-# ── Phase 0 regression ────────────────────────────────────────────────────────
-
-
-def test_discoverer_graph_still_compiles():
-    from pipeline.agents.discoverer import build_discoverer_graph
-    compiled = build_discoverer_graph().compile()
-    assert compiled is not None
-
-@pytest.mark.asyncio
-async def test_merge_results_suppresses_skipped(monkeypatch):
-    """
-    If a fingerprint exists in the DB with status=skipped, it should
-    be suppressed from the shortlist.
-    """
-    import pipeline.agents.discoverer as disc
-
-    skipped_fp = _make_fingerprint(
-        INDEED_FIXTURES[0].company,
-        INDEED_FIXTURES[0].title,
-        INDEED_FIXTURES[0].location,
-    )
-
-    async def mock_get_connection():
         class FakeAsyncCursor:
             def __init__(self, rows):
                 self._iter = iter(rows)
