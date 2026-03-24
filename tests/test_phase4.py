@@ -340,11 +340,11 @@ def test_should_submit_routes_to_fill_form_when_ready():
 
 
 def test_should_submit_routes_to_abort_on_error():
-    """Errors present → 'abort' regardless of field map."""
+    """Errors present → 'abort_submission' regardless of field map."""
     from pipeline.agents.submitter import should_submit
     from pipeline.state import empty_state
 
     state = empty_state()
     state["ats_field_map"] = {"First Name": "#first_name"}
     state["errors"] = ["scan_form: Playwright navigation failed"]
-    assert should_submit(state) == "abort"
+    assert should_submit(state) == "abort_submission"
