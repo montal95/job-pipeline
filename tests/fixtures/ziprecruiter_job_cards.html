@@ -1,46 +1,47 @@
 <!--
-  Minimal ZipRecruiter job search results page fixture.
-  Reflects the DOM structure of ziprecruiter.com/jobs-search as of early 2026.
-  Three cards: two complete with salary, one without.
-  Used by test_parse_ziprecruiter_cards_* tests — no live browser required.
+  ZipRecruiter job card fixture — minimal representative DOM.
+  Reflects the structure of ziprecruiter.com/jobs-search results as of early 2026.
+  Used by test_parse_ziprecruiter_cards_* tests only. Not scraped from a live page.
+
+  Selector targets used by _parse_ziprecruiter_cards:
+    card:        article.job_result
+    title:       h2.job_title > a  (text + href)
+    company:     a.company_name
+    location:    span.location
+    salary:      span.compensation  (optional)
 -->
 <html>
 <body>
-  <div class="job_results">
+<div class="jobs_list">
 
-    <article class="job_result" data-job-id="zr-001">
-      <h2 class="job_title">
-        <a class="job_link" href="/c/Acme-Health/j/Senior-Rails-Engineer/?lvk=zr001">
-          Senior Rails Engineer
-        </a>
-      </h2>
-      <a class="company_name" href="/c/Acme-Health">Acme Health</a>
-      <span class="location">Chicago, IL</span>
-      <span class="compensation">$140,000 - $170,000/yr</span>
-    </article>
+  <!-- Card 1: full fields including salary range -->
+  <article class="job_result">
+    <h2 class="job_title">
+      <a href="/c/Acme/j/abc111">Senior Software Engineer</a>
+    </h2>
+    <a class="company_name">Acme Corp</a>
+    <span class="location">Chicago, IL</span>
+    <span class="compensation">$120,000 - $150,000/yr</span>
+  </article>
 
-    <article class="job_result" data-job-id="zr-002">
-      <h2 class="job_title">
-        <a class="job_link" href="/c/DataCo/j/AI-Engineer/?lvk=zr002">
-          AI Engineer
-        </a>
-      </h2>
-      <a class="company_name" href="/c/DataCo">DataCo</a>
-      <span class="location">Remote</span>
-      <span class="compensation">$160,000 - $200,000/yr</span>
-    </article>
+  <!-- Card 2: remote role, hourly rate -->
+  <article class="job_result">
+    <h2 class="job_title">
+      <a href="/c/DataCo/j/abc222">AI Engineer</a>
+    </h2>
+    <a class="company_name">DataCo</a>
+    <span class="location">Remote</span>
+    <span class="compensation">$80/hr</span>
+  </article>
 
-    <article class="job_result" data-job-id="zr-003">
-      <h2 class="job_title">
-        <a class="job_link" href="/c/HealthTech/j/Backend-Engineer/?lvk=zr003">
-          Backend Engineer
-        </a>
-      </h2>
-      <a class="company_name" href="/c/HealthTech">HealthTech Co</a>
-      <span class="location">Chicago, IL (Hybrid)</span>
-      <!-- compensation intentionally absent -->
-    </article>
+  <!-- Card 3: missing company element — should be skipped gracefully -->
+  <article class="job_result">
+    <h2 class="job_title">
+      <a href="/c/Unknown/j/abc333">DevOps Engineer</a>
+    </h2>
+    <span class="location">Austin, TX</span>
+  </article>
 
-  </div>
+</div>
 </body>
 </html>

@@ -1,39 +1,50 @@
 <!--
-  Minimal LinkedIn job search results page fixture.
-  Reflects the DOM structure of linkedin.com/jobs/search/ as of early 2026.
-  Three cards: two complete, one missing company (tests graceful skip).
-  Used by test_parse_linkedin_cards_* tests — no live browser required.
+  LinkedIn job card fixture — minimal representative DOM.
+  Reflects the structure of linkedin.com/jobs/search results as of early 2026.
+  Used by test_parse_linkedin_cards_* tests only. Not scraped from a live page.
+
+  Selector targets used by _parse_linkedin_cards:
+    card:        div.job-search-card
+    title:       h3.base-search-card__title
+    company:     h4.base-search-card__subtitle
+    location:    span.job-search-card__location
+    apply link:  a.base-card__full-link  (href)
+    salary:      span.job-search-card__salary-info  (optional)
 -->
 <html>
 <body>
-  <div class="jobs-search__results-list">
+<ul class="jobs-search__results-list">
 
+  <!-- Card 1: full fields including salary -->
+  <li>
     <div class="job-search-card">
+      <a class="base-card__full-link" href="/jobs/view/111111111/"></a>
       <h3 class="base-search-card__title">Senior Rails Engineer</h3>
-      <h4 class="base-search-card__subtitle">
-        <a class="hidden-nested-link">Acme Health</a>
-      </h4>
+      <h4 class="base-search-card__subtitle">Acme Health</h4>
       <span class="job-search-card__location">Chicago, IL</span>
-      <a class="base-card__full-link" href="/jobs/view/123456789/?refId=abc"></a>
       <span class="job-search-card__salary-info">$140K/yr - $170K/yr</span>
     </div>
+  </li>
 
+  <!-- Card 2: remote role, no salary -->
+  <li>
     <div class="job-search-card">
+      <a class="base-card__full-link" href="/jobs/view/222222222/"></a>
       <h3 class="base-search-card__title">Full Stack Developer</h3>
-      <h4 class="base-search-card__subtitle">
-        <a class="hidden-nested-link">TechStartup Inc</a>
-      </h4>
+      <h4 class="base-search-card__subtitle">TechStartup Inc</h4>
       <span class="job-search-card__location">Remote</span>
-      <a class="base-card__full-link" href="/jobs/view/987654321/?refId=def"></a>
     </div>
+  </li>
 
+  <!-- Card 3: missing company element — should be skipped gracefully -->
+  <li>
     <div class="job-search-card">
+      <a class="base-card__full-link" href="/jobs/view/333333333/"></a>
       <h3 class="base-search-card__title">Backend Engineer</h3>
-      <!-- company element intentionally absent — tests graceful skip -->
       <span class="job-search-card__location">New York, NY</span>
-      <a class="base-card__full-link" href="/jobs/view/111222333/?refId=ghi"></a>
     </div>
+  </li>
 
-  </div>
+</ul>
 </body>
 </html>
