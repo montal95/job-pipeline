@@ -110,6 +110,28 @@ class JobListing(RawJobListing):
     notes: str | None = None
 
 
+# ── Document content models ────────────────────────────────────────────────────
+
+
+class ResumeSection(BaseModel):
+    heading: str
+    bullets: list[str]
+
+
+class ResumeContent(BaseModel):
+    name: str
+    contact: str
+    summary: str
+    sections: list[ResumeSection]
+    skills: list[str]
+
+
+class CoverLetterContent(BaseModel):
+    opening: str
+    body_paragraphs: list[str]
+    closing: str
+
+
 # ── Submission ─────────────────────────────────────────────────────────────────
 
 
@@ -139,6 +161,10 @@ class PipelineState(TypedDict):
     # Document generation
     current_job_id: str | None
     interview_answers: dict[str, str]
+    cv_text: str | None
+    company_context: str | None
+    resume_content: ResumeContent | None
+    cover_letter_content: CoverLetterContent | None
     resume_path: str | None
     cover_letter_path: str | None
     revision_round: int
@@ -165,6 +191,10 @@ def empty_state() -> PipelineState:
         skipped=[],
         current_job_id=None,
         interview_answers={},
+        cv_text=None,
+        company_context=None,
+        resume_content=None,
+        cover_letter_content=None,
         resume_path=None,
         cover_letter_path=None,
         revision_round=0,
