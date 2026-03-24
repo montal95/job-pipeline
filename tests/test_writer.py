@@ -19,7 +19,6 @@ from pydantic import ValidationError
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SAMPLE_CV = FIXTURES / "sample_cv.txt"
-SAMPLE_JOB_JSON = FIXTURES / "sample_job.json"
 SAMPLE_RESUME_LLM = FIXTURES / "sample_resume_llm_response.json"
 SAMPLE_CL_LLM = FIXTURES / "sample_cover_letter_llm_response.json"
 
@@ -27,6 +26,21 @@ SAMPLE_CL_LLM = FIXTURES / "sample_cover_letter_llm_response.json"
 @pytest.fixture()
 def cv_text() -> str:
     return SAMPLE_CV.read_text(encoding="utf-8")
+
+
+@pytest.fixture()
+def writer_state(cv_text, sample_job):
+    """
+    empty_state() pre-loaded with the standard test CV, job shortlist, and
+    empty interview answers. Used by LLM node tests to avoid repeating setup.
+    """
+    from pipeline.state import empty_state
+    state = empty_state()
+    state["cv_text"] = cv_text
+    state["shortlist"] = [sample_job]
+    state["current_job_id"] = sample_job.id
+    state["interview_answers"] = {}
+    return state
 
 
 # ── CV loading ─────────────────────────────────────────────────────────────────
@@ -154,57 +168,38 @@ def test_render_cover_letter_docx_contains_opening(cover_letter_content, tmp_pat
 # ── Node behavior ──────────────────────────────────────────────────────────────
 
 
-def test_write_resume_makes_one_llm_call_returns_content(cv_text, sample_job, tmp_path):
+def test_write_resume_makes_one_llm_call_returns_content(writer_state, mock_llm_message, tmp_path):
     """write_resume makes exactly one Anthropic API call and returns resume_content (no path)."""
     from pipeline.agents.writer import write_resume
-    from pipeline.state import empty_state
-
-    mock_message = MagicMock()
-    mock_message.content = [MagicMock(text=SAMPLE_RESUME_LLM.read_text(encoding="utf-8"))]
-
-    state = empty_state()
-    state["cv_text"] = cv_text
-    state["shortlist"] = [sample_job]
-    state["current_job_id"] = sample_job.id
-    state["interview_answers"] = {}
 
     with patch("pipeline.agents.writer.anthropic.Anthropic") as mock_cls:
         mock_client = MagicMock()
         mock_cls.return_value = mock_client
-        mock_client.messages.create.return_value = mock_message
+        mock_client.messages.create.return_value = mock_llm_message
         with patch("pipeline.agents.writer.settings") as mock_settings:
             mock_settings.output_dir = str(tmp_path)
             mock_settings.max_revision_rounds = 3
-            result = write_resume(state)
+            result = write_resume(writer_state)
 
     mock_client.messages.create.assert_called_once()
     assert result.get("resume_content") is not None
     assert result.get("resume_path") is None  # deferred-render contract
 
 
-def test_apply_feedback_increments_revision_round(cv_text, sample_job, tmp_path):
+def test_apply_feedback_increments_revision_round(writer_state, mock_llm_message, tmp_path):
     from pipeline.agents.writer import apply_feedback
-    from pipeline.state import empty_state
 
-    mock_message = MagicMock()
-    mock_message.content = [MagicMock(text=SAMPLE_RESUME_LLM.read_text(encoding="utf-8"))]
-
-    state = empty_state()
-    state["cv_text"] = cv_text
-    state["shortlist"] = [sample_job]
-    state["current_job_id"] = sample_job.id
-    state["revision_round"] = 0
-    state["human_feedback"] = "Please make the summary more concise."
-    state["interview_answers"] = {}
+    writer_state["revision_round"] = 0
+    writer_state["human_feedback"] = "Please make the summary more concise."
 
     with patch("pipeline.agents.writer.anthropic.Anthropic") as mock_cls:
         mock_client = MagicMock()
         mock_cls.return_value = mock_client
-        mock_client.messages.create.return_value = mock_message
+        mock_client.messages.create.return_value = mock_llm_message
         with patch("pipeline.agents.writer.settings") as mock_settings:
             mock_settings.output_dir = str(tmp_path)
             mock_settings.max_revision_rounds = 3
-            result = apply_feedback(state)
+            result = apply_feedback(writer_state)
 
     assert result["revision_round"] == 1
 

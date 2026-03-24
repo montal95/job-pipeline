@@ -8,7 +8,6 @@ No live browser, no Playwright.
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,6 +19,19 @@ GREENHOUSE_NO_UPLOAD = FIXTURES / "greenhouse_form_no_upload.html"
 WORKDAY_FORM = FIXTURES / "workday_form.html"
 GREENHOUSE_CONFIRM = FIXTURES / "greenhouse_confirmation.html"
 SUBMISSION_ERROR = FIXTURES / "submission_error.html"
+
+
+@pytest.fixture()
+def submitter_settings(tmp_path, seeded_db):
+    """
+    Patches pipeline.agents.submitter.settings with seeded_db and tmp_path.
+    Use for render node tests that need content JSON present in the DB.
+    Yields the mock settings object for inspection if needed.
+    """
+    with patch("pipeline.agents.submitter.settings") as mock_settings:
+        mock_settings.app_db_path = seeded_db
+        mock_settings.output_dir = str(tmp_path)
+        yield mock_settings
 
 
 # ── File input detection ──────────────────────────────────────────────────────
@@ -76,7 +88,7 @@ def test_map_form_fields_workday_happy_path():
 
 
 def test_render_documents_if_needed_renders_when_upload_required(
-    tmp_path, seeded_db, sample_job
+    sample_job, submitter_settings, tmp_path
 ):
     """needs_file_upload=True + content JSON in DB → .docx files created."""
     from pipeline.agents.submitter import _render_documents_if_needed
@@ -86,10 +98,7 @@ def test_render_documents_if_needed_renders_when_upload_required(
     state["current_job_id"] = sample_job.id
     state["needs_file_upload"] = True
 
-    with patch("pipeline.agents.submitter.settings") as mock_settings:
-        mock_settings.app_db_path = seeded_db
-        mock_settings.output_dir = str(tmp_path)
-        result = _render_documents_if_needed(state)
+    result = _render_documents_if_needed(state)
 
     assert result.get("resume_path") is not None
     assert result.get("cover_letter_path") is not None
@@ -98,7 +107,7 @@ def test_render_documents_if_needed_renders_when_upload_required(
 
 
 def test_render_documents_if_needed_skips_when_no_upload(
-    tmp_path, seeded_db, sample_job
+    sample_job, submitter_settings, tmp_path
 ):
     """needs_file_upload=False → no-op, no files created."""
     from pipeline.agents.submitter import _render_documents_if_needed
@@ -108,46 +117,25 @@ def test_render_documents_if_needed_skips_when_no_upload(
     state["current_job_id"] = sample_job.id
     state["needs_file_upload"] = False
 
-    with patch("pipeline.agents.submitter.settings") as mock_settings:
-        mock_settings.app_db_path = seeded_db
-        mock_settings.output_dir = str(tmp_path)
-        result = _render_documents_if_needed(state)
+    result = _render_documents_if_needed(state)
 
     assert result == {}
     assert list(tmp_path.glob("*.docx")) == []
 
 
-def test_render_documents_if_needed_errors_on_missing_content(tmp_path, sample_job):
+def test_render_documents_if_needed_errors_on_missing_content(
+    sample_job, bare_db, tmp_path
+):
     """Content JSON absent from DB → errors list populated."""
     from pipeline.agents.submitter import _render_documents_if_needed
     from pipeline.state import empty_state
-
-    empty_db = str(tmp_path / "empty.db")
-    conn = sqlite3.connect(empty_db)
-    conn.executescript(
-        (Path(__file__).parent.parent / "migrations" / "001_initial.sql").read_text()
-    )
-    try:
-        conn.execute("ALTER TABLE jobs ADD COLUMN resume_content_json TEXT")
-        conn.execute("ALTER TABLE jobs ADD COLUMN cover_letter_content_json TEXT")
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass
-    conn.execute(
-        "INSERT INTO jobs (id, title, company, location, source, source_url, "
-        "discovered_at, status, fingerprint) VALUES (?, 'T', 'C', 'L', 's', 'u', "
-        "datetime('now'), 'queued', '')",
-        (sample_job.id,),
-    )
-    conn.commit()
-    conn.close()
 
     state = empty_state()
     state["current_job_id"] = sample_job.id
     state["needs_file_upload"] = True
 
     with patch("pipeline.agents.submitter.settings") as mock_settings:
-        mock_settings.app_db_path = empty_db
+        mock_settings.app_db_path = bare_db
         mock_settings.output_dir = str(tmp_path)
         result = _render_documents_if_needed(state)
 

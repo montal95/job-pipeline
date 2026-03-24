@@ -3,13 +3,14 @@ Shared pytest fixtures available to all test modules.
 
 Fixtures defined here are auto-discovered by pytest — no import needed.
 Any test file can request sample_job, resume_content, cover_letter_content,
-or seeded_db without duplicating the setup code.
+seeded_db, bare_db, or mock_llm_message without duplicating setup code.
 """
 
 from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -78,3 +79,49 @@ def seeded_db(tmp_path, sample_job, resume_content, cover_letter_content):
     conn.commit()
     conn.close()
     return db_path
+
+
+@pytest.fixture()
+def bare_db(tmp_path, sample_job):
+    """
+    Minimal SQLite DB with migrations 001+002 applied and one jobs row inserted,
+    but resume_content_json and cover_letter_content_json are NULL.
+
+    Use this to test error paths where content JSON is expected but absent.
+    Contrast with seeded_db which has content JSON populated.
+    """
+    db_path = str(tmp_path / "bare_pipeline.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        (Path(__file__).parent.parent / "migrations" / "001_initial.sql").read_text()
+    )
+    try:
+        conn.execute("ALTER TABLE jobs ADD COLUMN resume_content_json TEXT")
+        conn.execute("ALTER TABLE jobs ADD COLUMN cover_letter_content_json TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+    conn.execute(
+        "INSERT INTO jobs (id, title, company, location, source, source_url, "
+        "discovered_at, status, fingerprint) VALUES (?, 'T', 'C', 'L', 's', 'u', "
+        "datetime('now'), 'queued', '')",
+        (sample_job.id,),
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+@pytest.fixture()
+def mock_llm_message():
+    """
+    A pre-built MagicMock that mimics an Anthropic API response containing
+    the sample resume LLM JSON fixture.
+
+    Use this wherever a test needs to patch anthropic.Anthropic and provide
+    a canned response from messages.create().
+    """
+    msg = MagicMock()
+    msg.content = [MagicMock(text=(FIXTURES / "sample_resume_llm_response.json").read_text(encoding="utf-8"))]
+    return msg
