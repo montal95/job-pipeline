@@ -313,48 +313,88 @@ async def scrape_indeed(state: PipelineState) -> dict:
 
 
 async def scrape_dice(state: PipelineState) -> dict:
-    """Scrape Dice via their JSON search API. More stable than HTML parsing."""
+    """
+    Scrape Dice via Playwright network interception.
+    The Dice search API (dhigroupinc.com) is called server-side by Next.js, so
+    the x-api-key is never sent to the browser and httpx requests are 403'd.
+    Instead: load the Dice search page in a real browser, intercept the API
+    response that fires in the background, and parse the JSON we already know.
+    """
+    if async_playwright is None:
+        console.print("[yellow]⚠ Playwright not available — skipping Dice[/yellow]")
+        return {"raw_results": []}
+
     params = state["search_params"]
-    api_url = (
-        "https://job-search-api.svc.dhigroupinc.com/v1/dice/jobs/search"
+    search_url = (
+        f"https://www.dice.com/jobs"
         f"?q={quote_plus(params.query)}"
         f"&location={quote_plus(params.location)}"
         f"&countryCode=US&radius=30&radiusUnit=mi"
-        f"&page=1&pageSize={params.max_results_per_source}&language=en"
     )
-    dice_headers = {
-        **HEADERS,
-        "Referer": "https://www.dice.com/",
-        "Origin": "https://www.dice.com",
-        "Accept": "application/json, text/plain, */*",
-        "x-api-key": settings.dice_api_key,
-    }
     results: list[RawJobListing] = []
+    jobs_data: list[dict] = []
     try:
-        async with httpx.AsyncClient(headers=dice_headers, follow_redirects=True, timeout=15) as client:
-            resp = await client.get(api_url)
-        if resp.status_code in (403, 429):
-            console.print(f"[yellow]⚠ Dice blocked (HTTP {resp.status_code}) — skipping[/yellow]")
-            return {"raw_results": []}
-        resp.raise_for_status()
-        for job in resp.json().get("data", []):
-            loc_obj = job.get("location", {})
-            location = f"{loc_obj.get('city','')}, {loc_obj.get('state','')}".strip(", ") or params.location
-            apply_url = job.get("applyUrl") or job.get("externalApplyLink")
-            comp_low, comp_high = _parse_compensation(job.get("salaryRange", "") or "")
-            ws = (job.get("workplaceTypes") or [""])[0].lower()
+        import asyncio as _asyncio
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=False, channel="chrome")
+            page = await browser.new_page()
+            await page.goto(search_url, wait_until="networkidle")
+            await _asyncio.sleep(5)
+            # Wait for job title links to render
+            try:
+                await page.wait_for_selector("[data-testid='job-search-job-detail-link']", timeout=10000)
+            except Exception:
+                console.print("[yellow]⚠ Dice: job cards did not appear[/yellow]")
+                await browser.close()
+                return {"raw_results": []}
+            # Extract all job data via JS — walk up from title link to card container
+            jobs_data = await page.evaluate("""() => {
+                const links = document.querySelectorAll('[data-testid="job-search-job-detail-link"]');
+                return Array.from(links).map(link => {
+                    // Walk up the DOM to find the card container — try progressively higher parents
+                    let card = link.parentElement;
+                    for (let i = 0; i < 8; i++) {
+                        if (!card) break;
+                        const text = card.innerText || '';
+                        const lines = text.split('\\n').map(s => s.trim()).filter(Boolean);
+                        if (lines.length >= 3) break;
+                        card = card.parentElement;
+                    }
+                    // The link lives in div[role="main"] (Details section).
+                    // One level above is the full card with company name.
+                    const detailsDiv = link.closest('[role="main"]');
+                    const fullCard = detailsDiv ? detailsDiv.parentElement : card;
+                    const lines = (fullCard ? fullCard.innerText : '').split('\\n').map(s => s.trim()).filter(Boolean);
+                    // Structure: [company, cta_badge, title, location, '•', date, description, type, salary?]
+                    return {
+                        title: link.getAttribute('aria-label') || link.innerText.trim(),
+                        url: link.href,
+                        company: lines[0] || '',
+                        location: lines[3] || '',
+                        salary: lines.find(l => l.includes('$')) || '',
+                    };
+                });
+            }""")
+            await browser.close()
+
+        for job in jobs_data[:params.max_results_per_source]:
+            title = job.get("title", "")
+            job_url = job.get("url", "")
+            company = job.get("company") or "Unknown"
+            location = job.get("location") or params.location
+            salary_str = job.get("salary", "")
+            comp_low, comp_high = _parse_compensation(salary_str)
+            ws = location.lower()
             workplace = (
                 WorkplaceType.REMOTE if "remote" in ws else
                 WorkplaceType.HYBRID if "hybrid" in ws else
                 WorkplaceType.ONSITE if "onsite" in ws else None
             )
-            job_id = job.get("id", "")
             results.append(RawJobListing(
-                source="dice", title=job.get("title", "Unknown"),
-                company=job.get("advertiserName", "Unknown"), location=location,
-                source_url=f"https://www.dice.com/job-detail/{job_id}" if job_id else api_url,
-                apply_url=apply_url, description=job.get("jobDescription"),
-                compensation_low=comp_low, compensation_high=comp_high, workplace_type=workplace,
+                source="dice", title=title, company=company, location=location,
+                source_url=job_url or search_url,
+                compensation_low=comp_low, compensation_high=comp_high,
+                workplace_type=workplace,
             ))
     except Exception as exc:
         console.print(f"[yellow]⚠ Dice scrape error: {exc}[/yellow]")

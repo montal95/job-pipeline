@@ -432,3 +432,16 @@ async def test_scrape_ziprecruiter_stale_session_returns_empty(monkeypatch, tmp_
     state = empty_state()
     state["search_params"] = SearchParams(query="engineer", location="Chicago, IL")
     assert await disc.scrape_ziprecruiter(state) == {"raw_results": []}
+
+
+# ── Dice scraper ───────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_scrape_dice_no_playwright_returns_empty(monkeypatch):
+    """scrape_dice returns empty gracefully when Playwright is unavailable."""
+    import pipeline.agents.discoverer as disc
+    monkeypatch.setattr(disc, "async_playwright", None)
+    state = empty_state()
+    state["search_params"] = SearchParams(query="engineer", location="Chicago, IL")
+    assert await disc.scrape_dice(state) == {"raw_results": []}
