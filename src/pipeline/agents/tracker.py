@@ -1,12 +1,34 @@
 """
 Tracker Agent — Phase 5 implementation.
 
-Responsibility: Status dashboard, follow-up scheduling, status updates.
-Zero LLM calls — pure DB reads/writes and terminal rendering via rich.
+Responsibility: Status dashboard, follow-up scheduling, overdue detection,
+and user-driven status updates. Zero LLM calls — pure DB reads/writes and
+Rich terminal rendering.
 
 LangGraph pattern exercised here:
-  - Graph as workflow orchestrator for purely synchronous DB operations.
-    Demonstrates that LangGraph is useful even without LLMs or async I/O.
+  - Graph as workflow orchestrator for purely synchronous operations.
+    The Tracker has no LLMs, no async I/O, and no interrupt gates — it is a
+    straight linear graph over SQLite reads and Rich terminal output. This
+    demonstrates that LangGraph is useful as a sequencing tool even when AI
+    is not involved: the node order encodes causal dependencies (schedule
+    before check; check before render) that would otherwise live in prose.
+
+Node order and why it matters:
+  load_pipeline → schedule_followup → flag_overdue → render_dashboard → update_status
+
+  schedule_followup must precede flag_overdue: it writes followup_due_date
+  values that flag_overdue then reads to determine what is overdue.
+  flag_overdue must precede render_dashboard: it appends warnings that the
+  dashboard uses to render ⚠ overdue indicators.
+  update_status is last and is a no-op if tracker_new_status is not set in
+  state — safe to always run at the end of the graph.
+
+Pure functions vs. node implementations:
+  _count_by_status, _find_overdue, _format_days_since are pure Python with
+  no DB or terminal dependencies — fully unit-testable. render_dashboard,
+  schedule_followup, and flag_overdue are not unit-tested for the same reason
+  as Playwright nodes: their outputs are terminal side-effects or DB writes
+  that are integration-level concerns, not unit concerns.
 """
 
 from __future__ import annotations

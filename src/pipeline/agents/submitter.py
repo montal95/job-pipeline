@@ -5,9 +5,24 @@ Responsibility: Fill and submit the ATS form for a specific job.
 Zero LLM calls — all form filling is deterministic from ATS field maps.
 
 LangGraph patterns exercised here:
-  - interrupt() for the hard submission gate (no form touched without explicit yes)
-  - Conditional render: docx files only created when ATS form has a file upload input
-  - Swappable ATS strategy modules (Greenhouse, Workday, Ashby, etc.)
+  - Conditional render node: render_documents_if_needed reads
+    resume_content_json / cover_letter_content_json from the DB and renders
+    .docx files only if scan_form detected a file upload input on the ATS
+    form. If the form has no file input, no files are created at all.
+  - Two conditional edge functions with different semantics:
+    should_submit (post-scan_form) routes on errors + field map population —
+    did the form scan succeed? should_submit_after_gate (post-interrupt) routes
+    on human_approved — did the user explicitly confirm submission?
+  - Hard interrupt gate: submission_gate surfaces a form summary (company,
+    role, ATS type, fields filled, file attached) and requires the literal
+    string 'yes' before any submit action. State is checkpointed at the
+    interrupt boundary — aborting is always safe.
+
+Browser session limitation: LangGraph interrupt() checkpoints state and exits
+the process. The Playwright browser opened by fill_form does not survive the
+interrupt boundary. submit_form therefore re-navigates and re-fills before
+clicking submit. This is not a workaround — it is the correct behavior given
+the interrupt/resume execution model.
 """
 
 from __future__ import annotations

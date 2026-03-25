@@ -1,13 +1,26 @@
 """
 Writer Agent — Phase 3 implementation.
 
-Responsibility: Generate a tailored resume and cover letter (.docx) for a
-specific job listing using the user's CV as the source of truth.
+Responsibility: Generate a tailored resume and cover letter for a specific
+job listing using the user's CV as the source of truth.
 
 LangGraph patterns exercised here:
-  - interrupt() for the pre-write interview and review gates
-  - Cycles: the feedback revision loop (write → review → revise → review)
-  - Structured LLM output as rendering input (not final artifact)
+  - interrupt() at two gates: pre_write_interview (gap analysis before
+    generation begins) and review_interrupt (approve / feedback / abort
+    after generation). Both gates checkpoint state — a closed terminal
+    can resume the next day via `pipeline write <job_id>`.
+  - Cycle (back-edge): apply_feedback → write_resume loops until the user
+    approves or max_revision_rounds is reached. should_revise is the routing
+    function that controls the cycle exit conditions.
+  - Structured LLM output as rendering input: LLM returns JSON validated by
+    Pydantic; python-docx renders deterministically from the model. Revision
+    rounds re-call the LLM only — the renderer is never re-invoked speculatively.
+
+Deferred render architecture (Phase 4 change):
+  write_resume and write_cover_letter persist ResumeContent / CoverLetterContent
+  as JSON to the DB. The Submitter renders .docx files only if the ATS form
+  has a <input type="file"> element. This eliminates unnecessary disk I/O for
+  ATS platforms that parse resumes from structured fields or pasted text.
 """
 
 from __future__ import annotations
