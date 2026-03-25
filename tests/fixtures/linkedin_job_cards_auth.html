@@ -1,15 +1,14 @@
 <!--
   LinkedIn authenticated job card fixture — DOM structure for logged-in search results.
-  Reflects div.job-card-container structure used when scraping with a saved auth session.
-  Added after _parse_linkedin_cards was rewritten to handle both auth and public DOM.
+  Confirmed via Claude in Chrome DevTools inspection of live LinkedIn search (March 2026).
 
-  Selector targets used by the authenticated path in _parse_linkedin_cards:
-    card:        div.job-card-container
-    title:       a.job-card-container__link span[aria-hidden='true']
-    company:     .job-card-container__primary-description
-    location:    .job-card-container__metadata-item
-    apply link:  a.job-card-container__link (href)
-    salary:      .job-card-container__salary-info (optional)
+  Confirmed selectors:
+    card:      div.job-card-container  (data-job-id attribute carries job ID)
+    title:     a.job-card-container__link span[aria-hidden="true"]
+    company:   .artdeco-entity-lockup__subtitle span
+    location:  .artdeco-entity-lockup__caption
+    salary:    [class*="salary"]  (rarely present; null in most results)
+    url:       constructed as https://www.linkedin.com/jobs/view/{data-job-id}
 -->
 <html>
 <body>
@@ -17,34 +16,41 @@
 
   <!-- Card 1: full fields including salary -->
   <li class="jobs-search-results__list-item">
-    <div class="job-card-container">
+    <div class="display-flex job-card-container" data-job-id="auth-111111">
+      <div class="artdeco-entity-lockup">
+        <div class="artdeco-entity-lockup__subtitle">
+          <span>Acme Health</span>
+        </div>
+        <div class="artdeco-entity-lockup__caption">Chicago, IL</div>
+      </div>
       <a class="job-card-container__link" href="/jobs/view/auth-111111/">
         <span aria-hidden="true">Senior Rails Engineer</span>
       </a>
-      <div class="job-card-container__primary-description">Acme Health</div>
-      <ul class="job-card-container__metadata-wrapper">
-        <li class="job-card-container__metadata-item">Chicago, IL</li>
-      </ul>
-      <div class="job-card-container__salary-info">$140K/yr - $170K/yr</div>
+      <span class="job-card-container__salary-info">$140K/yr - $170K/yr</span>
     </div>
   </li>
 
   <!-- Card 2: remote role, no salary -->
   <li class="jobs-search-results__list-item">
-    <div class="job-card-container">
+    <div class="display-flex job-card-container" data-job-id="auth-222222">
+      <div class="artdeco-entity-lockup">
+        <div class="artdeco-entity-lockup__subtitle">
+          <span>TechStartup Inc</span>
+        </div>
+        <div class="artdeco-entity-lockup__caption">United States (Remote)</div>
+      </div>
       <a class="job-card-container__link" href="/jobs/view/auth-222222/">
         <span aria-hidden="true">Full Stack Developer</span>
       </a>
-      <div class="job-card-container__primary-description">TechStartup Inc</div>
-      <ul class="job-card-container__metadata-wrapper">
-        <li class="job-card-container__metadata-item">United States (Remote)</li>
-      </ul>
     </div>
   </li>
 
   <!-- Card 3: missing company — should be skipped gracefully -->
   <li class="jobs-search-results__list-item">
-    <div class="job-card-container">
+    <div class="display-flex job-card-container" data-job-id="auth-333333">
+      <div class="artdeco-entity-lockup">
+        <div class="artdeco-entity-lockup__caption">New York, NY</div>
+      </div>
       <a class="job-card-container__link" href="/jobs/view/auth-333333/">
         <span aria-hidden="true">Backend Engineer</span>
       </a>

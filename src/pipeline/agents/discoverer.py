@@ -113,6 +113,40 @@ def _parse_compensation(text: str) -> tuple[int | None, int | None]:
     return None, None
 
 
+def _extract_salary_from_description(description: str) -> tuple[int | None, int | None]:
+    """
+    Scan a job description for salary range text.
+    LinkedIn often buries salary in the description body rather than exposing it
+    as a structured field. Handles patterns like:
+      - "Base salary range $202,300 - $238,000"
+      - "Salary: $120,000 - $160,000 per year"
+      - "Pay range: $95K - $115K"
+      - "$140,000/year"
+    Falls back to _parse_compensation for K-notation and hourly rates.
+    """
+    if not description:
+        return None, None
+    # Look for lines that smell like salary context
+    salary_lines = [
+        line for line in description.split("\n")
+        if re.search(r"\$[\d,]+", line) and re.search(
+            r"\b(salary|pay|compensation|range|base|annual|per year|hourly)\b",
+            line, re.IGNORECASE
+        )
+    ]
+    for line in salary_lines:
+        low, high = _parse_compensation(line)
+        if low:
+            return low, high
+    # Fallback: scan any line containing a dollar range pattern
+    for line in description.split("\n"):
+        if re.search(r"\$[\d,]+\s*[-–]\s*\$[\d,]+", line):
+            low, high = _parse_compensation(line)
+            if low:
+                return low, high
+    return None, None
+
+
 def _get_auth_path(platform: str) -> Path:
     """Return the storage_state auth file path for a given platform."""
     return AUTH_DIR / f"{platform}.json"
@@ -133,27 +167,34 @@ def _parse_linkedin_cards(html: str) -> list[RawJobListing]:
     soup = BeautifulSoup(html, "html.parser")
     results: list[RawJobListing] = []
 
+    # Extract description text from the detail panel (visible for selected card only).
+    # Used as fallback salary source via _extract_salary_from_description.
+    desc_el = soup.select_one(".jobs-description__content, .jobs-box__html-content")
+    description_text = desc_el.get_text(separator="\n", strip=True) if desc_el else ""
+
     # Try authenticated DOM first (logged-in search results)
     auth_cards = soup.select("div.job-card-container")
     if auth_cards:
         for card in auth_cards:
             title_el = card.select_one("a.job-card-container__link span[aria-hidden='true']") \
-                       or card.select_one(".job-card-list__title--link span[aria-hidden='true']") \
                        or card.select_one("a.job-card-container__link")
-            company_el = card.select_one(".job-card-container__primary-description, .artdeco-entity-lockup__subtitle span")
-            location_el = card.select_one(".job-card-container__metadata-item, .job-card-container__metadata-wrapper li")
-            link_el = card.select_one("a.job-card-container__link, a.job-card-list__title")
-            salary_el = card.select_one(".job-card-container__salary-info, .compensation-info")
+            company_el = card.select_one(".artdeco-entity-lockup__subtitle span")
+            location_el = card.select_one(".artdeco-entity-lockup__caption") \
+                          or card.select_one("[class*='metadata'] li")
+            salary_el = card.select_one("[class*='salary']")
+            job_id = card.get("data-job-id", "")
             if not (title_el and company_el):
                 continue
             title = title_el.get_text(strip=True)
             company = company_el.get_text(strip=True)
             location = location_el.get_text(strip=True) if location_el else ""
-            href = link_el.get("href", "") if link_el else ""
-            source_url = f"https://www.linkedin.com{href}" if href.startswith("/") else href
+            source_url = f"https://www.linkedin.com/jobs/view/{job_id}" if job_id else ""
             comp_low, comp_high = _parse_compensation(
                 salary_el.get_text(strip=True) if salary_el else ""
             )
+            # Fallback: scan description text for salary range (LinkedIn often buries it there)
+            if not comp_low and card.get("aria-current") == "page" and description_text:
+                comp_low, comp_high = _extract_salary_from_description(description_text)
             workplace = WorkplaceType.REMOTE if "remote" in location.lower() else None
             results.append(RawJobListing(
                 source="linkedin",

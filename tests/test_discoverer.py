@@ -103,6 +103,54 @@ def test_parse_compensation_single_k():
     assert high == 150000
 
 
+# ── _extract_salary_from_description ──────────────────────────────────────────
+
+
+def test_extract_salary_from_description_base_salary_range():
+    """LinkedIn 'Base salary range $202,300 - $238,000' pattern."""
+    from pipeline.agents.discoverer import _extract_salary_from_description
+    low, high = _extract_salary_from_description(
+        "About the job\nBase salary range $202,300 - $238,000\nBenefits included."
+    )
+    assert low == 202300
+    assert high == 238000
+
+
+def test_extract_salary_from_description_k_notation():
+    """Pay range using K notation: '$95K - $115K'."""
+    from pipeline.agents.discoverer import _extract_salary_from_description
+    low, high = _extract_salary_from_description(
+        "Compensation\nPay range: $95K - $115K annually\nBonuses available."
+    )
+    assert low == 95000
+    assert high == 115000
+
+
+def test_extract_salary_from_description_no_salary():
+    """Returns None, None when no salary is mentioned."""
+    from pipeline.agents.discoverer import _extract_salary_from_description
+    low, high = _extract_salary_from_description(
+        "We are looking for a software engineer to join our team.\nGreat benefits."
+    )
+    assert low is None
+    assert high is None
+
+
+def test_extract_salary_from_description_empty_string():
+    from pipeline.agents.discoverer import _extract_salary_from_description
+    assert _extract_salary_from_description("") == (None, None)
+
+
+def test_extract_salary_from_description_range_with_em_dash():
+    """Handles em-dash separator as well as hyphen."""
+    from pipeline.agents.discoverer import _extract_salary_from_description
+    low, high = _extract_salary_from_description(
+        "Salary: $120,000 – $160,000 per year"
+    )
+    assert low == 120000
+    assert high == 160000
+
+
 # ── parse_search_params node ───────────────────────────────────────────────────
 
 
@@ -291,7 +339,14 @@ def test_parse_linkedin_cards_auth_dom_happy_path():
     assert results[0].title == "Senior Rails Engineer"
     assert results[0].company == "Acme Health"
     assert results[0].source == "linkedin"
-    assert "linkedin.com" in results[0].source_url
+
+
+def test_parse_linkedin_cards_auth_dom_url_uses_data_job_id():
+    """URL is constructed from data-job-id attribute, not from href."""
+    from pipeline.agents.discoverer import _parse_linkedin_cards
+    results = _parse_linkedin_cards(_load_fixture("linkedin_job_cards_auth.html"))
+    assert results[0].source_url == "https://www.linkedin.com/jobs/view/auth-111111"
+    assert results[1].source_url == "https://www.linkedin.com/jobs/view/auth-222222"
 
 
 def test_parse_linkedin_cards_auth_dom_salary_extracted():
@@ -317,9 +372,8 @@ def test_parse_linkedin_cards_auth_dom_missing_company_skipped():
 def test_parse_linkedin_cards_auth_dom_takes_priority_over_public():
     """When both auth and public cards exist, auth path wins (returns auth results)."""
     from pipeline.agents.discoverer import _parse_linkedin_cards
-    # Auth fixture has no public DOM cards — confirms auth branch fires exclusively
     results = _parse_linkedin_cards(_load_fixture("linkedin_job_cards_auth.html"))
-    assert all("auth-" in r.source_url for r in results)
+    assert all("/jobs/view/" in r.source_url for r in results)
 
 
 # ── ZipRecruiter card parser ───────────────────────────────────────────────────
