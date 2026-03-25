@@ -227,6 +227,67 @@ def test_should_revise_routes_correctly():
         assert should_revise(s3) == "warn_and_exit"
 
 
+def test_write_resume_passes_api_key_to_anthropic(writer_state, mock_llm_message, tmp_path):
+    """write_resume must instantiate Anthropic with api_key from settings, not rely on env var."""
+    from pipeline.agents.writer import write_resume
+
+    with patch("pipeline.agents.writer.anthropic.Anthropic") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = mock_llm_message
+        with patch("pipeline.agents.writer.settings") as mock_settings:
+            mock_settings.output_dir = str(tmp_path)
+            mock_settings.max_revision_rounds = 3
+            mock_settings.anthropic_api_key = "sk-ant-test-key"
+            write_resume(writer_state)
+
+    mock_cls.assert_called_once_with(api_key="sk-ant-test-key")
+
+
+def test_pre_write_interview_no_gaps_returns_early(sample_job):
+    """When gap analysis finds no missing skills, return immediately without calling interrupt()."""
+    from pipeline.agents.writer import pre_write_interview
+    from pipeline.state import empty_state
+    from unittest.mock import patch as _patch
+
+    # Give the job a description that overlaps fully with the CV skills
+    sample_job.description = "Ruby on Rails experience required."
+    state = empty_state()
+    state["cv_text"] = "Experienced with Ruby on Rails."
+    state["shortlist"] = [sample_job]
+    state["current_job_id"] = sample_job.id
+
+    with _patch("pipeline.agents.writer.interrupt") as mock_interrupt:
+        result = pre_write_interview(state)
+
+    mock_interrupt.assert_not_called()
+    assert result == {"interview_answers": {}}
+
+
+def test_pre_write_interview_with_gaps_calls_interrupt(sample_job, monkeypatch):
+    """When gaps exist, interrupt() is called with questions for each gap."""
+    from pipeline.agents.writer import pre_write_interview
+    from pipeline.state import empty_state
+    from unittest.mock import patch as _patch
+
+    sample_job.description = "Kubernetes and Terraform experience required."
+    state = empty_state()
+    state["cv_text"] = "Experienced with Ruby on Rails and PostgreSQL."
+    state["shortlist"] = [sample_job]
+    state["current_job_id"] = sample_job.id
+
+    captured = {}
+    def fake_interrupt(payload):
+        captured.update(payload)
+        return {}
+
+    with _patch("pipeline.agents.writer.interrupt", side_effect=fake_interrupt):
+        pre_write_interview(state)
+
+    assert "questions" in captured
+    assert len(captured["questions"]) > 0
+
+
 # ── Deferred-render contract (regressions) ────────────────────────────────────
 
 
