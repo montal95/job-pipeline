@@ -192,9 +192,12 @@ def _parse_linkedin_cards(html: str) -> list[RawJobListing]:
             comp_low, comp_high = _parse_compensation(
                 salary_el.get_text(strip=True) if salary_el else ""
             )
-            # Fallback: scan description text for salary range (LinkedIn often buries it there)
+            # Fallback 1: scan description text for buried salary (selected card only)
             if not comp_low and card.get("aria-current") == "page" and description_text:
                 comp_low, comp_high = _extract_salary_from_description(description_text)
+            # Fallback 2: salary embedded in title e.g. "Backend Engineer ($150k - $180k)"
+            if not comp_low:
+                comp_low, comp_high = _extract_salary_from_description(title)
             workplace = WorkplaceType.REMOTE if "remote" in location.lower() else None
             results.append(RawJobListing(
                 source="linkedin",
@@ -413,6 +416,7 @@ async def scrape_dice(state: PipelineState) -> dict:
                         company: lines[0] || '',
                         location: lines[3] || '',
                         salary: lines.find(l => l.includes('$')) || '',
+                        description: lines[6] || '',
                     };
                 });
             }""")
@@ -424,7 +428,14 @@ async def scrape_dice(state: PipelineState) -> dict:
             company = job.get("company") or "Unknown"
             location = job.get("location") or params.location
             salary_str = job.get("salary", "")
+            description = job.get("description", "")
             comp_low, comp_high = _parse_compensation(salary_str)
+            # Fallback 1: scan description for buried salary e.g. "Salary: $170,000 - $210,000"
+            if not comp_low:
+                comp_low, comp_high = _extract_salary_from_description(salary_str + "\n" + description)
+            # Fallback 2: salary embedded in title e.g. "Staff Engineer ($150k - $180k)"
+            if not comp_low:
+                comp_low, comp_high = _extract_salary_from_description(title)
             ws = location.lower()
             workplace = (
                 WorkplaceType.REMOTE if "remote" in ws else
