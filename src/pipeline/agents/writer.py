@@ -542,7 +542,7 @@ def write_resume(state: PipelineState) -> dict:
 
     prompt = _build_resume_prompt(cv_text, job, answers)
 
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     message = client.messages.create(
         model=LLM_MODEL,
         max_tokens=4096,
@@ -571,7 +571,7 @@ def write_cover_letter(state: PipelineState) -> dict:
 
     prompt = _build_cover_letter_prompt(cv_text, job, answers)
 
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     message = client.messages.create(
         model=LLM_MODEL,
         max_tokens=2048,
@@ -674,7 +674,7 @@ def apply_feedback(state: PipelineState) -> dict:
         "No preamble, no markdown fences."
     )
 
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     message = client.messages.create(
         model=LLM_MODEL,
         max_tokens=4096,
