@@ -245,7 +245,15 @@ def _parse_ziprecruiter_cards(html: str) -> list[RawJobListing]:
 
 
 async def scrape_indeed(state: PipelineState) -> dict:
-    """Scrape Indeed via httpx + BS4. Gracefully handles 403/429."""
+    """
+    Scrape Indeed via Playwright (headless=False, no auth).
+    httpx returns 403 — a real browser bypasses Indeed's bot detection.
+    The existing BS4 card selectors are reused unchanged.
+    """
+    if async_playwright is None:
+        console.print("[yellow]⚠ Playwright not available — skipping Indeed[/yellow]")
+        return {"raw_results": []}
+
     params = state["search_params"]
     query_str = params.query + (" remote" if params.remote else "")
     url = (
@@ -256,13 +264,22 @@ async def scrape_indeed(state: PipelineState) -> dict:
     )
     results: list[RawJobListing] = []
     try:
-        async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=15) as client:
-            resp = await client.get(url)
-        if resp.status_code in (403, 429):
-            console.print(f"[yellow]⚠ Indeed blocked (HTTP {resp.status_code}) — skipping[/yellow]")
-            return {"raw_results": []}
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
+        import asyncio as _asyncio
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=False, channel="chrome")
+            page = await browser.new_page()
+            await page.goto(url, wait_until="domcontentloaded")
+            await _asyncio.sleep(3)  # let JS render job cards
+            # Wait for at least one card selector to appear
+            for sel in ("div.job_seen_beacon", "div.tapItem", "li.css-5lfssm"):
+                try:
+                    await page.wait_for_selector(sel, timeout=5000)
+                    break
+                except Exception:
+                    continue
+            html = await page.content()
+            await browser.close()
+        soup = BeautifulSoup(html, "html.parser")
         cards = soup.select("li.css-5lfssm, div.job_seen_beacon, div.tapItem")
         for card in cards[:params.max_results_per_source]:
             title_el = card.select_one("h2.jobTitle span[title], h2.jobTitle a span")
@@ -305,9 +322,16 @@ async def scrape_dice(state: PipelineState) -> dict:
         f"&countryCode=US&radius=30&radiusUnit=mi"
         f"&page=1&pageSize={params.max_results_per_source}&language=en"
     )
+    dice_headers = {
+        **HEADERS,
+        "Referer": "https://www.dice.com/",
+        "Origin": "https://www.dice.com",
+        "Accept": "application/json, text/plain, */*",
+        "x-api-key": "1YAt0R9wBg4WfsF9VB2778F5CHLAPMVH3IWmTf45",
+    }
     results: list[RawJobListing] = []
     try:
-        async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=15) as client:
+        async with httpx.AsyncClient(headers=dice_headers, follow_redirects=True, timeout=15) as client:
             resp = await client.get(api_url)
         if resp.status_code in (403, 429):
             console.print(f"[yellow]⚠ Dice blocked (HTTP {resp.status_code}) — skipping[/yellow]")
