@@ -50,3 +50,5 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+scripts/list_queued.py
