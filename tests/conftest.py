@@ -159,16 +159,16 @@ def tracker_db(tmp_path):
     conn.commit()
 
     jobs = [
-        (TRACKER_JOB_ID_APPLIED,        "Senior Rails Engineer", "Acme Health",   "Chicago, IL", "applied"),
-        (TRACKER_JOB_ID_APPLIED_FUTURE,  "Backend Engineer",     "Startup Inc",   "Remote",      "applied"),
-        (TRACKER_JOB_ID_REJECTED,        "AI Engineer",          "DataCo",        "New York, NY","rejected"),
+        (TRACKER_JOB_ID_APPLIED,        "Senior Rails Engineer", "Acme Health",   "Chicago, IL", "applied",  "fp_test_001"),
+        (TRACKER_JOB_ID_APPLIED_FUTURE,  "Backend Engineer",     "Startup Inc",   "Remote",      "applied",  "fp_test_002"),
+        (TRACKER_JOB_ID_REJECTED,        "AI Engineer",          "DataCo",        "New York, NY","rejected", "fp_test_003"),
     ]
-    for job_id, title, company, location, status in jobs:
+    for job_id, title, company, location, status, fingerprint in jobs:
         conn.execute(
             "INSERT INTO jobs (id, title, company, location, source, source_url, "
             "discovered_at, status, fingerprint) VALUES (?, ?, ?, ?, 'indeed', 'http://x', "
-            "datetime('now'), ?, '')",
-            (job_id, title, company, location, status),
+            "datetime('now'), ?, ?)",
+            (job_id, title, company, location, status, fingerprint),
         )
 
     for sub in SAMPLE_SUBMISSIONS:

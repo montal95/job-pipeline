@@ -511,6 +511,9 @@ def pre_write_interview(state: PipelineState) -> dict:
         for g in gaps[:5]
     ]
 
+    if not questions:
+        return {"interview_answers": {}}
+
     answers = interrupt({
         "gaps": gaps,
         "questions": questions,
