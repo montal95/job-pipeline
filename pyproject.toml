@@ -17,6 +17,7 @@ dependencies = [
     "pydantic>=2.10.0",
     "pydantic-settings>=2.6.0",
     "pypdf>=4.0.0",
+    "langgraph-checkpoint-sqlite>=3.0.3",
 ]
 
 [project.scripts]

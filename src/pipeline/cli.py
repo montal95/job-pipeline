@@ -21,6 +21,21 @@ from __future__ import annotations
 
 import asyncio
 import os
+import warnings
+import logging
+
+# TODO: Remove these suppression blocks once pipeline.state types are properly registered
+# in LangGraph's msgpack allow-list. Proper fix: register via `allowed_msgpack_modules`
+# once the LangGraph API stabilizes. grep: "Deserializing unregistered type"
+_original_showwarning = warnings.showwarning
+def _filtered_showwarning(message, *args, **kwargs):
+    msg = str(message)
+    if any(x in msg for x in ("Deserializing unregistered type", "Core Pydantic V1", "tool.uv.dev-dependencies")):
+        return
+    _original_showwarning(message, *args, **kwargs)
+warnings.showwarning = _filtered_showwarning
+logging.getLogger("langgraph").setLevel(logging.ERROR)
+logging.getLogger("langchain_core").setLevel(logging.ERROR)
 import re
 import subprocess
 import sys
@@ -267,14 +282,23 @@ async def _discover(query: str, location: str, remote: bool, sources: str):
 
     from pipeline.agents.discoverer import build_discoverer_graph
     from pipeline.state import SearchParams, empty_state
+    from pipeline.state import SearchParams as _SearchParams
 
-    thread_id = f"discover-{datetime.utcnow().date()}"
+    thread_id = f"discover-{datetime.utcnow().strftime('%Y-%m-%dT%H-%M-%S')}"
     console.print(f"[bold green]Discoverer[/bold green] — thread: [dim]{thread_id}[/dim]")
 
     checkpointer_path = "./data/checkpoints.db"
     import aiosqlite
     from pathlib import Path
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+    import langgraph.checkpoint.serde.jsonplus as _serde
+    # Register pipeline state types to suppress deserialization warnings
+    try:
+        from langgraph.checkpoint.base import _allowed_msgpack_modules  # type: ignore
+        _allowed_msgpack_modules.add("pipeline.state")
+    except Exception:
+        pass
 
     Path(checkpointer_path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -285,7 +309,7 @@ async def _discover(query: str, location: str, remote: bool, sources: str):
     )
     config = {"configurable": {"thread_id": thread_id}}
 
-    async with await AsyncSqliteSaver.from_conn_string(checkpointer_path) as checkpointer:
+    async with AsyncSqliteSaver.from_conn_string(checkpointer_path) as checkpointer:
         graph = build_discoverer_graph().compile(checkpointer=checkpointer, interrupt_before=["triage_interrupt"])
 
         # First invoke: runs scrapers → merge → pauses before triage_interrupt
@@ -390,7 +414,7 @@ async def _write(job_id: str):
 
     config = {"configurable": {"thread_id": thread_id}}
 
-    async with await AsyncSqliteSaver.from_conn_string(checkpointer_path) as checkpointer:
+    async with AsyncSqliteSaver.from_conn_string(checkpointer_path) as checkpointer:
         graph = build_writer_graph().compile(checkpointer=checkpointer)
 
         initial = empty_state()
@@ -470,7 +494,7 @@ async def _submit(job_id: str):
 
     config = {"configurable": {"thread_id": thread_id}}
 
-    async with await AsyncSqliteSaver.from_conn_string(checkpointer_path) as checkpointer:
+    async with AsyncSqliteSaver.from_conn_string(checkpointer_path) as checkpointer:
         graph = build_submitter_graph().compile(checkpointer=checkpointer)
 
         initial = empty_state()
@@ -554,7 +578,7 @@ async def _track():
 
     config = {"configurable": {"thread_id": thread_id}}
 
-    async with await AsyncSqliteSaver.from_conn_string(checkpointer_path) as checkpointer:
+    async with AsyncSqliteSaver.from_conn_string(checkpointer_path) as checkpointer:
         graph = build_tracker_graph().compile(checkpointer=checkpointer)
         await graph.ainvoke(empty_state(), config=config)
 

@@ -132,6 +132,42 @@ def _parse_linkedin_cards(html: str) -> list[RawJobListing]:
     """
     soup = BeautifulSoup(html, "html.parser")
     results: list[RawJobListing] = []
+
+    # Try authenticated DOM first (logged-in search results)
+    auth_cards = soup.select("div.job-card-container")
+    if auth_cards:
+        for card in auth_cards:
+            title_el = card.select_one("a.job-card-container__link span[aria-hidden='true']") \
+                       or card.select_one(".job-card-list__title--link span[aria-hidden='true']") \
+                       or card.select_one("a.job-card-container__link")
+            company_el = card.select_one(".job-card-container__primary-description, .artdeco-entity-lockup__subtitle span")
+            location_el = card.select_one(".job-card-container__metadata-item, .job-card-container__metadata-wrapper li")
+            link_el = card.select_one("a.job-card-container__link, a.job-card-list__title")
+            salary_el = card.select_one(".job-card-container__salary-info, .compensation-info")
+            if not (title_el and company_el):
+                continue
+            title = title_el.get_text(strip=True)
+            company = company_el.get_text(strip=True)
+            location = location_el.get_text(strip=True) if location_el else ""
+            href = link_el.get("href", "") if link_el else ""
+            source_url = f"https://www.linkedin.com{href}" if href.startswith("/") else href
+            comp_low, comp_high = _parse_compensation(
+                salary_el.get_text(strip=True) if salary_el else ""
+            )
+            workplace = WorkplaceType.REMOTE if "remote" in location.lower() else None
+            results.append(RawJobListing(
+                source="linkedin",
+                title=title,
+                company=company,
+                location=location,
+                source_url=source_url,
+                compensation_low=comp_low,
+                compensation_high=comp_high,
+                workplace_type=workplace,
+            ))
+        return results
+
+    # Fallback: public (unauthenticated) DOM
     for card in soup.select("div.job-search-card"):
         title_el = card.select_one("h3.base-search-card__title")
         company_el = card.select_one("h4.base-search-card__subtitle")
@@ -329,16 +365,45 @@ async def scrape_linkedin(state: PipelineState) -> dict:
     results: list[RawJobListing] = []
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, channel="chrome")
+            browser = await p.chromium.launch(headless=False, channel="chrome")
             context = await browser.new_context(storage_state=str(auth_path))
             page = await context.new_page()
             await page.goto(search_url, wait_until="domcontentloaded")
-            await page.wait_for_selector("div.job-search-card, ul.jobs-search__results-list", timeout=10000)
+            # Give the page extra time to settle after initial load
+            import asyncio as _asyncio
+            await _asyncio.sleep(3)
             if _is_login_redirect(page.url, "linkedin"):
                 console.print(
                     "[yellow]⚠ LinkedIn session expired. "
                     "Run: python scripts/save_auth.py --platform linkedin[/yellow]"
                 )
+                await browser.close()
+                return {"raw_results": []}
+            # Debug: log current URL and a sample of the page so we can see what loaded
+            console.print(f"[dim]LinkedIn page URL: {page.url}[/dim]")
+            # Try authenticated selectors first, fall back to public ones
+            AUTH_SELECTORS = (
+                "li.jobs-search-results__list-item",
+                "div.job-card-container",
+                "div.scaffold-layout__list-container",
+            )
+            PUBLIC_SELECTORS = (
+                "div.job-search-card",
+                "ul.jobs-search__results-list",
+            )
+            found = False
+            for sel in (*AUTH_SELECTORS, *PUBLIC_SELECTORS):
+                try:
+                    await page.wait_for_selector(sel, timeout=5000)
+                    console.print(f"[dim]LinkedIn selector matched: {sel}[/dim]")
+                    found = True
+                    break
+                except Exception:
+                    continue
+            if not found:
+                # Dump a snippet of the page HTML for debugging
+                snippet = (await page.content())[:2000]
+                console.print(f"[yellow]⚠ LinkedIn: no known selector matched. Page snippet:\n{snippet}[/yellow]")
                 await browser.close()
                 return {"raw_results": []}
             html = await page.content()
@@ -567,7 +632,6 @@ def build_discoverer_graph() -> StateGraph:
     graph = StateGraph(PipelineState)
 
     graph.add_node("parse_search_params", parse_search_params)
-    graph.add_node("fan_out_sources", fan_out_sources)
     graph.add_node("scrape_indeed", scrape_indeed)
     graph.add_node("scrape_dice", scrape_dice)
     graph.add_node("scrape_linkedin", scrape_linkedin)
@@ -577,8 +641,7 @@ def build_discoverer_graph() -> StateGraph:
     graph.add_node("persist_to_db", persist_to_db)
 
     graph.set_entry_point("parse_search_params")
-    graph.add_edge("parse_search_params", "fan_out_sources")
-    graph.add_conditional_edges("fan_out_sources", fan_out_sources)
+    graph.add_conditional_edges("parse_search_params", fan_out_sources)
     for scraper in ("scrape_indeed", "scrape_dice", "scrape_linkedin", "scrape_ziprecruiter"):
         graph.add_edge(scraper, "merge_results")
     graph.add_edge("merge_results", "triage_interrupt")
