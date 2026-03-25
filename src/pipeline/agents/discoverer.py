@@ -509,8 +509,7 @@ async def merge_results(state: PipelineState) -> dict:
     suppress = {JobStatus.SKIPPED, JobStatus.APPLIED, JobStatus.SUBMITTED, JobStatus.OFFER}
     previously_seen: dict[str, JobStatus] = {}
     try:
-        conn = await get_connection()
-        async with conn:
+        async with get_connection() as conn:
             async for row in await conn.execute(
                 "SELECT fingerprint, status FROM jobs WHERE fingerprint IN ({})".format(
                     ",".join("?" * len(seen))
@@ -565,8 +564,7 @@ async def persist_to_db(state: PipelineState) -> dict:
     run_id = str(uuid4())
     now = datetime.utcnow().isoformat()
     try:
-        conn = await get_connection()
-        async with conn:
+        async with get_connection() as conn:
             for job in approved:
                 await conn.execute(
                     """

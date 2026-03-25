@@ -20,19 +20,35 @@ from pipeline.config import settings
 MIGRATIONS_DIR = Path(__file__).parent.parent.parent / "migrations"
 
 
-async def get_connection() -> aiosqlite.Connection:
-    """Return an open connection to the app DB with foreign keys enabled."""
+def get_connection() -> aiosqlite.Connection:
+    """
+    Return an aiosqlite connection context manager for the app DB.
+
+    Usage:
+        async with get_connection() as conn:
+            await conn.execute(...)
+
+    The connection is opened, configured, and closed automatically.
+    Do NOT await this function — use it directly as an async context manager.
+    """
     Path(settings.app_db_path).parent.mkdir(parents=True, exist_ok=True)
-    conn = await aiosqlite.connect(settings.app_db_path)
-    conn.row_factory = aiosqlite.Row
-    await conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+
+    class _ManagedConn:
+        async def __aenter__(self) -> aiosqlite.Connection:
+            self._conn = await aiosqlite.connect(settings.app_db_path)
+            self._conn.row_factory = aiosqlite.Row
+            await self._conn.execute("PRAGMA foreign_keys = ON")
+            return self._conn
+
+        async def __aexit__(self, *args) -> None:
+            await self._conn.close()
+
+    return _ManagedConn()  # type: ignore[return-value]
 
 
 async def run_migrations() -> None:
     """Apply all pending SQL migrations in order."""
-    conn = await get_connection()
-    try:
+    async with get_connection() as conn:
         # Track applied migrations in a simple meta table
         await conn.execute(
             """
@@ -73,8 +89,6 @@ async def run_migrations() -> None:
             )
             await conn.commit()
             print(f"[db] Applied migration: {migration_file.name}")
-    finally:
-        await conn.close()
 
 
 if __name__ == "__main__":

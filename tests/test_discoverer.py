@@ -156,7 +156,7 @@ async def test_merge_results_dedup_cross_source(monkeypatch):
     """
     import pipeline.agents.discoverer as disc
 
-    async def mock_get_connection():
+    def mock_get_connection():
         class FakeCursor:
             def __aiter__(self): return iter([])
         class FakeConn:
@@ -183,7 +183,7 @@ async def test_merge_results_suppresses_skipped(monkeypatch):
         INDEED_FIXTURES[0].location,
     )
 
-    async def mock_get_connection():
+    def mock_get_connection():
         class FakeAsyncCursor:
             def __init__(self, rows):
                 self._iter = iter(rows)
