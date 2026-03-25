@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     candidate_phone: str = "214-686-7539"
     candidate_linkedin_url: str = "https://linkedin.com/in/samuel-montalvo-jr/"
 
+    # Dice API — public key from Dice's frontend bundle; may rotate.
+    # Override in .env if you have a fresher key from DevTools network inspection.
+    dice_api_key: str = "1YAt0R9wBg4WfsF9VB2778F5CHLAPMVH3IWmTf45"
+
     # Ghost listing detection
     ghost_threshold_days: int = 14
 

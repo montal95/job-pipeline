@@ -327,7 +327,7 @@ async def scrape_dice(state: PipelineState) -> dict:
         "Referer": "https://www.dice.com/",
         "Origin": "https://www.dice.com",
         "Accept": "application/json, text/plain, */*",
-        "x-api-key": "1YAt0R9wBg4WfsF9VB2778F5CHLAPMVH3IWmTf45",
+        "x-api-key": settings.dice_api_key,
     }
     results: list[RawJobListing] = []
     try:
