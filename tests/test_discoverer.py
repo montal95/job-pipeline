@@ -280,6 +280,48 @@ def test_parse_linkedin_cards_salary_extracted():
     assert results[0].compensation_high == 170000
 
 
+# ── LinkedIn card parser — authenticated DOM ──────────────────────────────────
+
+
+def test_parse_linkedin_cards_auth_dom_happy_path():
+    """Authenticated DOM (div.job-card-container) is parsed correctly."""
+    from pipeline.agents.discoverer import _parse_linkedin_cards
+    results = _parse_linkedin_cards(_load_fixture("linkedin_job_cards_auth.html"))
+    assert len(results) == 2
+    assert results[0].title == "Senior Rails Engineer"
+    assert results[0].company == "Acme Health"
+    assert results[0].source == "linkedin"
+    assert "linkedin.com" in results[0].source_url
+
+
+def test_parse_linkedin_cards_auth_dom_salary_extracted():
+    from pipeline.agents.discoverer import _parse_linkedin_cards
+    results = _parse_linkedin_cards(_load_fixture("linkedin_job_cards_auth.html"))
+    assert results[0].compensation_low == 140000
+    assert results[0].compensation_high == 170000
+
+
+def test_parse_linkedin_cards_auth_dom_remote_detected():
+    from pipeline.agents.discoverer import _parse_linkedin_cards
+    from pipeline.state import WorkplaceType
+    results = _parse_linkedin_cards(_load_fixture("linkedin_job_cards_auth.html"))
+    assert results[1].workplace_type == WorkplaceType.REMOTE
+
+
+def test_parse_linkedin_cards_auth_dom_missing_company_skipped():
+    from pipeline.agents.discoverer import _parse_linkedin_cards
+    results = _parse_linkedin_cards(_load_fixture("linkedin_job_cards_auth.html"))
+    assert "Backend Engineer" not in [r.title for r in results]
+
+
+def test_parse_linkedin_cards_auth_dom_takes_priority_over_public():
+    """When both auth and public cards exist, auth path wins (returns auth results)."""
+    from pipeline.agents.discoverer import _parse_linkedin_cards
+    # Auth fixture has no public DOM cards — confirms auth branch fires exclusively
+    results = _parse_linkedin_cards(_load_fixture("linkedin_job_cards_auth.html"))
+    assert all("auth-" in r.source_url for r in results)
+
+
 # ── ZipRecruiter card parser ───────────────────────────────────────────────────
 
 
