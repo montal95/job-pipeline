@@ -158,7 +158,7 @@ limitations before merging to `development`.
 | Submitter — ATS form fill, submission gate | ✅ | Greenhouse full; Workday manual fallback |
 | Tracker — Rich dashboard, follow-up scheduling | ✅ | |
 | Discoverer sources expanded | ✅ | LinkedIn, Dice, ZipRecruiter, Built In Chicago |
-| Indeed | 🅿️ | CAPTCHA blocks Playwright |
+| Indeed | 🅿️ | Playwright fingerprint detected at login — grep `INDEED_PARKED` |
 | Wellfound | 🅿️ | IP-based bot detection — grep `WELLFOUND_PARKED` |
 | Submitter — ZipRecruiter auth | 🔜 | `save_auth.py --platform ziprecruiter` |
 | Submitter — Ashby ATS strategy | 🔜 | DOM fingerprint research needed |

@@ -305,79 +305,97 @@ def _transform_ziprecruiter_jobs(
 
 async def scrape_indeed(state: PipelineState) -> dict:
     """
-    Scrape Indeed via Playwright (headless=False).
-    Uses a saved auth session (playwright/.auth/indeed.json) if available —
-    this carries the CAPTCHA-solved cookie across runs. If no auth file exists,
-    falls back to an unauthenticated browser which will likely hit CAPTCHA.
+    PARKED — Playwright fingerprint detected at login form level (March 2026).
+    grep: INDEED_PARKED
 
-    Save a session first with:
-        python scripts/save_auth.py --platform indeed
+    Indeed detects Playwright on the login form itself before any CAPTCHA can
+    be solved — storage_state auth cannot be saved. Block is browser-fingerprint
+    based, not IP based (unlike Wellfound).
+
+    Full implementation preserved in commented code below. Card selectors and
+    BS4 parsing logic were confirmed working against Indeed's HTML structure.
+
+    Potential workarounds to research (same as Wellfound):
+      1. playwright-extra + puppeteer-extra-plugin-stealth (patches fingerprint)
+      2. Residential proxy with real browser headers
+      3. Indeed Publisher API (requires application approval)
     """
-    if async_playwright is None:
-        console.print("[yellow]⚠ Playwright not available — skipping Indeed[/yellow]")
-        return {"raw_results": []}
+    console.print("[dim]Indeed: parked (Playwright fingerprint detected) — skipping[/dim]")
+    return {"raw_results": []}
 
-    params = state["search_params"]
-    query_str = params.query + (" remote" if params.remote else "")
-    url = (
-        f"https://www.indeed.com/jobs"
-        f"?q={quote_plus(query_str)}"
-        f"&l={quote_plus(params.location)}"
-        f"&sort=date&limit={params.max_results_per_source}"
-    )
-    auth_path = _get_auth_path("indeed")
-    results: list[RawJobListing] = []
-    try:
-        import asyncio as _asyncio
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=False, channel="chrome")
-            if auth_path.exists():
-                context = await browser.new_context(storage_state=str(auth_path))
-            else:
-                console.print(
-                    "[yellow]⚠ No Indeed auth file found — CAPTCHA likely. "
-                    "Run: python scripts/save_auth.py --platform indeed[/yellow]"
-                )
-                context = await browser.new_context()
-            page = await context.new_page()
-            await page.goto(url, wait_until="domcontentloaded")
-            await _asyncio.sleep(3)
-            for sel in ("div.job_seen_beacon", "div.tapItem", "li.css-5lfssm"):
-                try:
-                    await page.wait_for_selector(sel, timeout=5000)
-                    break
-                except Exception:
-                    continue
-            html = await page.content()
-            await browser.close()
-        soup = BeautifulSoup(html, "html.parser")
-        cards = soup.select("li.css-5lfssm, div.job_seen_beacon, div.tapItem")
-        for card in cards[:params.max_results_per_source]:
-            title_el = card.select_one("h2.jobTitle span[title], h2.jobTitle a span")
-            company_el = card.select_one("span.companyName, [data-testid='company-name']")
-            location_el = card.select_one("div.companyLocation, [data-testid='text-location']")
-            link_el = card.select_one("a[id^='job_'], a.jcs-JobTitle, h2.jobTitle a")
-            salary_el = card.select_one("div.metadata.salary-snippet-container")
-            if not (title_el and company_el):
-                continue
-            title = title_el.get("title") or title_el.get_text(strip=True)
-            company = company_el.get_text(strip=True)
-            location = location_el.get_text(strip=True) if location_el else params.location
-            href = link_el.get("href", "") if link_el else ""
-            source_url = f"https://www.indeed.com{href}" if href.startswith("/") else href
-            comp_low, comp_high = _parse_compensation(
-                salary_el.get_text(strip=True) if salary_el else ""
-            )
-            results.append(RawJobListing(
-                source="indeed", title=title, company=company, location=location,
-                source_url=source_url or url, compensation_low=comp_low,
-                compensation_high=comp_high,
-                workplace_type=WorkplaceType.REMOTE if "remote" in location.lower() else None,
-            ))
-    except Exception as exc:
-        console.print(f"[yellow]⚠ Indeed scrape error: {exc}[/yellow]")
-    console.print(f"[dim]Indeed: {len(results)} listings[/dim]")
-    return {"raw_results": results}
+
+# # ── scrape_indeed full implementation (INDEED_PARKED) ────────────────────────
+# # Uncomment and re-wire into SOURCE_NODE_MAP + build_discoverer_graph when
+# # a workaround for Indeed's Playwright fingerprint detection is found.
+# #
+# # Card selectors confirmed against Indeed's HTML structure:
+# #   li.css-5lfssm, div.job_seen_beacon, div.tapItem
+# #   title:    h2.jobTitle span[title] or h2.jobTitle a span
+# #   company:  span.companyName or [data-testid='company-name']
+# #   location: div.companyLocation or [data-testid='text-location']
+# #   link:     a[id^='job_'], a.jcs-JobTitle, h2.jobTitle a
+# #   salary:   div.metadata.salary-snippet-container
+# #
+# async def _scrape_indeed_impl(state: PipelineState) -> dict:
+#     if async_playwright is None:
+#         return {"raw_results": []}
+#     params = state["search_params"]
+#     query_str = params.query + (" remote" if params.remote else "")
+#     url = (
+#         f"https://www.indeed.com/jobs"
+#         f"?q={quote_plus(query_str)}"
+#         f"&l={quote_plus(params.location)}"
+#         f"&sort=date&limit={params.max_results_per_source}"
+#     )
+#     auth_path = _get_auth_path("indeed")
+#     results: list[RawJobListing] = []
+#     try:
+#         import asyncio as _asyncio
+#         async with async_playwright() as p:
+#             browser = await p.chromium.launch(headless=False, channel="chrome")
+#             context = (
+#                 await browser.new_context(storage_state=str(auth_path))
+#                 if auth_path.exists()
+#                 else await browser.new_context()
+#             )
+#             page = await context.new_page()
+#             await page.goto(url, wait_until="domcontentloaded")
+#             await _asyncio.sleep(3)
+#             for sel in ("div.job_seen_beacon", "div.tapItem", "li.css-5lfssm"):
+#                 try:
+#                     await page.wait_for_selector(sel, timeout=5000)
+#                     break
+#                 except Exception:
+#                     continue
+#             html = await page.content()
+#             await browser.close()
+#         soup = BeautifulSoup(html, "html.parser")
+#         for card in soup.select("li.css-5lfssm, div.job_seen_beacon, div.tapItem")[:params.max_results_per_source]:
+#             title_el = card.select_one("h2.jobTitle span[title], h2.jobTitle a span")
+#             company_el = card.select_one("span.companyName, [data-testid='company-name']")
+#             location_el = card.select_one("div.companyLocation, [data-testid='text-location']")
+#             link_el = card.select_one("a[id^='job_'], a.jcs-JobTitle, h2.jobTitle a")
+#             salary_el = card.select_one("div.metadata.salary-snippet-container")
+#             if not (title_el and company_el):
+#                 continue
+#             title = title_el.get("title") or title_el.get_text(strip=True)
+#             company = company_el.get_text(strip=True)
+#             location = location_el.get_text(strip=True) if location_el else params.location
+#             href = link_el.get("href", "") if link_el else ""
+#             source_url = f"https://www.indeed.com{href}" if href.startswith("/") else href
+#             comp_low, comp_high = _parse_compensation(
+#                 salary_el.get_text(strip=True) if salary_el else ""
+#             )
+#             results.append(RawJobListing(
+#                 source="indeed", title=title, company=company, location=location,
+#                 source_url=source_url or url, compensation_low=comp_low,
+#                 compensation_high=comp_high,
+#                 workplace_type=WorkplaceType.REMOTE if "remote" in location.lower() else None,
+#             ))
+#     except Exception as exc:
+#         console.print(f"[yellow]⚠ Indeed scrape error: {exc}[/yellow]")
+#     console.print(f"[dim]Indeed: {len(results)} listings[/dim]")
+#     return {"raw_results": results}
 
 
 # ── Dice scraper (JSON API, no auth) ──────────────────────────────────────────

@@ -38,14 +38,7 @@ PLATFORM_CONFIG: dict[str, dict] = {
         "auth_file": "ziprecruiter.json",
         "ready_hint": "Log in to ZipRecruiter, then wait until you can see job matches.",
     },
-    "indeed": {
-        "login_url": "https://www.indeed.com/account/login",
-        "auth_file": "indeed.json",
-        "ready_hint": (
-            "Log in to Indeed. If a CAPTCHA appears, solve it manually. "
-            "Wait until you can see the Indeed homepage or job search results."
-        ),
-    },
+    # "indeed" removed — Playwright fingerprint detected at login form level (INDEED_PARKED)
 }
 
 def _dry_run(platforms: list[str]) -> None:
@@ -139,7 +132,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--platform",
-        choices=["linkedin", "ziprecruiter", "indeed", "all"],
+        choices=["linkedin", "ziprecruiter", "all"],
         required=True,
         help="Which platform(s) to authenticate.",
     )
