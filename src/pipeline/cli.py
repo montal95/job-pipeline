@@ -377,11 +377,12 @@ def _collect_interview_answers(interrupt_val: dict) -> dict:
 
 def _collect_review_decision(interrupt_val: dict) -> str:
     """
-    Show generated content preview and prompt the user to approve, abort, or provide feedback.
+    Show resume preview (and cover letter preview if available) and prompt for decision.
+    In the full E2E flow both documents are shown together before submission.
+    With --resume-only, cover_letter_content will be absent and only the resume is shown.
     Returns "approve", "abort", or a feedback string.
     """
     resume_preview = interrupt_val.get("resume_preview", "(no resume content)")
-    cl_preview = interrupt_val.get("cover_letter_preview", "(no cover letter content)")
     resume_content = interrupt_val.get("resume_content")
     cl_content = interrupt_val.get("cover_letter_content")
 
@@ -428,19 +429,17 @@ def _collect_review_decision(interrupt_val: dict) -> str:
     else:
         console.print(resume_preview)
 
-    console.print("[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]")
-    console.print("[bold]COVER LETTER PREVIEW[/bold]")
-    console.print("[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]\n")
-
+    # Cover letter — only shown in full flow (absent when --resume-only)
     if cl_content and hasattr(cl_content, "opening"):
+        console.print("\n[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]")
+        console.print("[bold]COVER LETTER PREVIEW[/bold]")
+        console.print("[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]\n")
         console.print(cl_content.opening, markup=False, highlight=False)
         console.print()
         for para in cl_content.body_paragraphs:
             console.print(para, markup=False, highlight=False)
             console.print()
         console.print(cl_content.closing, markup=False, highlight=False)
-    else:
-        console.print(cl_preview)
 
     console.print("\n[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]\n")
     console.print("  [green]y / yes[/green] — accept and save")
@@ -455,18 +454,51 @@ def _collect_review_decision(interrupt_val: dict) -> str:
     return decision if decision else "approve"
 
 
-# ── Write ──────────────────────────────────────────────────────────────────────
+def _collect_cl_decision(interrupt_val: dict) -> str:
+    """
+    Show cover letter preview and prompt for approve / abort / feedback.
+    Returns "approve", "abort", or a feedback string.
+    """
+    cl_content = interrupt_val.get("cover_letter_content")
+
+    console.print("\n[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]")
+    console.print("[bold]COVER LETTER PREVIEW[/bold]")
+    console.print("[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]\n")
+
+    if cl_content and hasattr(cl_content, "opening"):
+        console.print(cl_content.opening, markup=False, highlight=False)
+        console.print()
+        for para in cl_content.body_paragraphs:
+            console.print(para, markup=False, highlight=False)
+            console.print()
+        console.print(cl_content.closing, markup=False, highlight=False)
+    else:
+        console.print(interrupt_val.get("cover_letter_preview", "(no cover letter content)"))
+
+    console.print("\n[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]\n")
+    console.print("  [green]y / yes[/green] — accept and save")
+    console.print("  [red]n / no[/red]   — discard and exit")
+    console.print("  [dim]<feedback>[/dim] — type feedback to revise\n")
+
+    decision = console.input("  Decision: ").strip().lower()
+    if decision in ("y", "yes"):
+        return "approve"
+    if decision in ("n", "no"):
+        return "abort"
+    return decision if decision else "approve"
 
 
 @app.command()
 def write(
     job_id: str = typer.Argument(..., help="Job ID from the database"),
+    resume_only: bool = typer.Option(False, "--resume-only", "-r", help="Generate and review resume only, skip cover letter."),
+    cover_letter_only: bool = typer.Option(False, "--cover-letter-only", "-c", help="Generate and review cover letter only, skip resume."),
 ):
     """Generate tailored resume and cover letter for a specific job."""
-    run(_write(job_id))
+    run(_write(job_id, resume_only=resume_only, cover_letter_only=cover_letter_only))
 
 
-async def _write(job_id: str):
+async def _write(job_id: str, resume_only: bool = False, cover_letter_only: bool = False):
     from pathlib import Path
 
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -489,6 +521,8 @@ async def _write(job_id: str):
 
         initial = empty_state()
         initial["current_job_id"] = job_id
+        initial["write_resume_only"] = resume_only
+        initial["write_cover_letter_only"] = cover_letter_only
 
         # First invoke — runs load_job → fetch_cv → research_company
         # then hits pre_write_interview interrupt
@@ -518,10 +552,21 @@ async def _write(job_id: str):
                 except GraphInterrupt:
                     pass
 
-            elif "resume_preview" in interrupt_data:
-                # review_interrupt gate
+            elif interrupt_data.get("gate") == "resume":
+                # resume_review_interrupt — shows resume + CL (combined in full flow)
                 decision = _collect_review_decision(interrupt_data)
-                if decision.strip().lower() == "abort":
+                if decision.strip().lower() in ("abort", "n", "no"):
+                    console.print("[yellow]Application aborted.[/yellow]")
+                    break
+                try:
+                    await graph.ainvoke(Command(resume=decision), config=config)
+                except GraphInterrupt:
+                    pass
+
+            elif interrupt_data.get("gate") == "cover_letter":
+                # cl_review_interrupt — dedicated CL revision loop
+                decision = _collect_cl_decision(interrupt_data)
+                if decision.strip().lower() in ("abort", "n", "no"):
                     console.print("[yellow]Application aborted.[/yellow]")
                     break
                 try:

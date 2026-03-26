@@ -698,7 +698,7 @@ def render_cover_letter_docx(state: PipelineState) -> dict:
     return {}
 
 
-def review_interrupt(state: PipelineState) -> dict:
+def resume_review_interrupt(state: PipelineState) -> dict:
     """
     Human-in-the-loop gate: show a Rich text preview of generated content,
     wait for the user to approve, provide feedback, or abort.
@@ -739,20 +739,55 @@ def review_interrupt(state: PipelineState) -> dict:
         cover_letter_preview = "(no cover letter content)"
 
     feedback = interrupt({
+        "gate": "resume",
         "resume_preview": resume_preview,
-        "cover_letter_preview": cover_letter_preview,
         "resume_content": resume_content,
-        "cover_letter_content": cl_content,
-        "message": "Review content preview. Reply: 'approve', 'abort', or type feedback.",
+        "cover_letter_content": state.get("cover_letter_content"),  # None when --resume-only
+        "message": "Review resume (and cover letter if shown). Reply: 'y/yes' to approve, 'n/no' to abort, or type feedback to revise.",
     })
 
-    if feedback is None or str(feedback).strip().lower() == "approve":
+    if feedback is None or str(feedback).strip().lower() in ("approve", "y", "yes"):
         return {"human_feedback": None, "human_approved": True}
-    elif str(feedback).strip().lower() == "abort":
+    elif str(feedback).strip().lower() in ("abort", "n", "no"):
         return {
             "human_feedback": None,
             "human_approved": False,
-            "warnings": state.get("warnings", []) + ["Application aborted by user at review gate."],
+            "warnings": state.get("warnings", []) + ["Application aborted by user at resume review gate."],
+        }
+    else:
+        return {"human_feedback": str(feedback), "human_approved": False}
+
+
+def cl_review_interrupt(state: PipelineState) -> dict:
+    """
+    Human-in-the-loop gate for the cover letter revision loop.
+    Separate from resume_review_interrupt so each document has its own
+    independent review/feedback cycle.
+    """
+    cl_content = state.get("cover_letter_content")
+
+    if cl_content:
+        cover_letter_preview = (
+            f"Opening: {cl_content.opening[:150]}{'...' if len(cl_content.opening) > 150 else ''}\n"
+            f"Body paragraphs: {len(cl_content.body_paragraphs)}"
+        )
+    else:
+        cover_letter_preview = "(no cover letter content)"
+
+    feedback = interrupt({
+        "gate": "cover_letter",
+        "cover_letter_preview": cover_letter_preview,
+        "cover_letter_content": cl_content,
+        "message": "Review cover letter. Reply: 'y/yes' to approve, 'n/no' to abort, or type feedback to revise.",
+    })
+
+    if feedback is None or str(feedback).strip().lower() in ("approve", "y", "yes"):
+        return {"human_feedback": None, "human_approved": True}
+    elif str(feedback).strip().lower() in ("abort", "n", "no"):
+        return {
+            "human_feedback": None,
+            "human_approved": False,
+            "warnings": state.get("warnings", []) + ["Application aborted by user at cover letter review gate."],
         }
     else:
         return {"human_feedback": str(feedback), "human_approved": False}
@@ -803,6 +838,42 @@ def apply_feedback(state: PipelineState) -> dict:
     }
 
 
+def apply_cl_feedback(state: PipelineState) -> dict:
+    """
+    Targeted LLM call to revise cover letter based on user feedback.
+    Mirrors apply_feedback but operates on cover_letter_content.
+    Increments cl_revision_round. Clears human_feedback.
+    """
+    feedback = state.get("human_feedback") or ""
+    prev_content = state.get("cover_letter_content")
+    prev_json = prev_content.model_dump_json() if prev_content else "{}"
+
+    revision_prompt = (
+        f"The candidate has reviewed their cover letter and provided this feedback:\n\n"
+        f"FEEDBACK: {feedback}\n\n"
+        f"Here is the current cover letter JSON:\n{prev_json}\n\n"
+        "Apply the feedback and return ONLY an updated JSON object. "
+        "No preamble, no markdown fences.\n\n"
+        "CRITICAL FORMATTING RULES:\n"
+        "1. No markdown in any string value. No **bold**, no *italic*, no [brackets].\n"
+        "2. 'opening' is the first paragraph — plain prose, no line breaks inside.\n"
+        "3. 'body_paragraphs' is a list of 2–3 plain prose strings.\n"
+        "4. 'closing' is the final paragraph — plain prose.\n"
+        "5. Do not start any paragraph with 'I am writing to' — use a stronger opener.\n"
+        "6. Return JSON matching: {\"opening\": str, \"body_paragraphs\": [str], \"closing\": str}"
+    )
+
+    console.print("[dim]⏳ Applying cover letter feedback with LLM...[/dim]")
+    raw = _llm_call(revision_prompt, max_tokens=2048)
+    content = _parse_cover_letter_json(raw)
+
+    return {
+        "cover_letter_content": content,
+        "cl_revision_round": state.get("cl_revision_round", 0) + 1,
+        "human_feedback": None,
+    }
+
+
 def persist_documents(state: PipelineState) -> dict:
     """
     Serialize resume_content and cover_letter_content to JSON and write to
@@ -846,20 +917,51 @@ def persist_documents(state: PipelineState) -> dict:
     return {}
 
 
-def should_revise(state: PipelineState) -> str:
-    """
-    Conditional edge: route back to write nodes if feedback given and
-    revision budget remains, otherwise exit.
-    """
+def should_revise_resume(state: PipelineState) -> str:
+    """Route after resume_review_interrupt."""
     revision_round = state.get("revision_round", 0)
     human_feedback = state.get("human_feedback")
     max_rounds = settings.max_revision_rounds
-
     if human_feedback and revision_round < max_rounds:
         return "apply_feedback"
-    if revision_round >= max_rounds:
+    if revision_round >= max_rounds and human_feedback:
         return "warn_and_exit"
-    return "persist_documents"
+    # Approved — skip CL loop if --resume-only, otherwise go to CL revision loop
+    if state.get("write_resume_only"):
+        return "persist_documents"
+    return "cl_review_interrupt"
+
+
+def should_revise_cl(state: PipelineState) -> str:
+    """Route after cl_review_interrupt."""
+    cl_revision_round = state.get("cl_revision_round", 0)
+    human_feedback = state.get("human_feedback")
+    max_rounds = settings.max_revision_rounds
+    if human_feedback and cl_revision_round < max_rounds:
+        return "apply_cl_feedback"
+    if cl_revision_round >= max_rounds and human_feedback:
+        return "warn_and_exit"
+    return "persist_documents"  # approved
+
+
+def should_write_cl(state: PipelineState) -> str:
+    """
+    After resume loop completes, decide whether to run the CL loop.
+    --resume-only skips straight to persist.
+    """
+    if state.get("write_resume_only"):
+        return "persist_documents"
+    return "write_cover_letter"
+
+
+def should_write_resume(state: PipelineState) -> str:
+    """
+    After pre_write_interview, decide whether to run the resume loop.
+    --cover-letter-only skips straight to CL generation.
+    """
+    if state.get("write_cover_letter_only"):
+        return "write_cover_letter"
+    return "write_resume"
 
 
 def warn_and_exit(state: PipelineState) -> dict:
@@ -880,11 +982,21 @@ def build_writer_graph() -> StateGraph:
     """
     Compile the Writer subgraph.
 
-    The revision loop is the key LangGraph pattern here:
-      write_resume / write_cover_letter → render → review_interrupt
-        → apply_feedback (if feedback) → write again (cycle)
-        → persist_documents (if approved)
-        → warn_and_exit (if max rounds exceeded)
+    Two sequential revision loops — resume first, then cover letter:
+
+      pre_write_interview
+        → [should_write_resume] → write_resume → resume_review_interrupt
+            → [should_revise_resume] → apply_feedback (loop) → write_resume
+                                     → [should_write_cl] → write_cover_letter
+        → [should_write_cl] (if --cover-letter-only, skip resume loop)
+
+      write_cover_letter → cl_review_interrupt
+          → [should_revise_cl] → apply_cl_feedback (loop) → write_cover_letter
+                               → persist_documents
+
+    CLI flags (set in initial state):
+      write_resume_only=True     → skip CL loop, persist after resume approved
+      write_cover_letter_only=True → skip resume loop, go straight to CL
     """
     graph = StateGraph(PipelineState)
 
@@ -893,11 +1005,13 @@ def build_writer_graph() -> StateGraph:
     graph.add_node("research_company", research_company)
     graph.add_node("pre_write_interview", pre_write_interview)
     graph.add_node("write_resume", write_resume)
+    graph.add_node("resume_review_interrupt", resume_review_interrupt)
+    graph.add_node("apply_feedback", apply_feedback)
     graph.add_node("write_cover_letter", write_cover_letter)
+    graph.add_node("cl_review_interrupt", cl_review_interrupt)
+    graph.add_node("apply_cl_feedback", apply_cl_feedback)
     graph.add_node("render_resume_docx", render_resume_docx)
     graph.add_node("render_cover_letter_docx", render_cover_letter_docx)
-    graph.add_node("review_interrupt", review_interrupt)
-    graph.add_node("apply_feedback", apply_feedback)
     graph.add_node("persist_documents", persist_documents)
     graph.add_node("warn_and_exit", warn_and_exit)
 
@@ -905,22 +1019,44 @@ def build_writer_graph() -> StateGraph:
     graph.add_edge("load_job", "fetch_cv")
     graph.add_edge("fetch_cv", "research_company")
     graph.add_edge("research_company", "pre_write_interview")
-    graph.add_edge("pre_write_interview", "write_resume")
-    graph.add_edge("write_resume", "write_cover_letter")
-    graph.add_edge("write_cover_letter", "render_resume_docx")
-    graph.add_edge("render_resume_docx", "render_cover_letter_docx")
-    graph.add_edge("render_cover_letter_docx", "review_interrupt")
 
+    # After interview: route based on flags
     graph.add_conditional_edges(
-        "review_interrupt",
-        should_revise,
+        "pre_write_interview",
+        should_write_resume,
+        {"write_resume": "write_resume", "write_cover_letter": "write_cover_letter"},
+    )
+
+    # Resume loop — generate CL first (if not --resume-only) so combined view is available
+    graph.add_edge("write_resume", "write_cover_letter")
+    graph.add_edge("write_cover_letter", "resume_review_interrupt")
+    graph.add_conditional_edges(
+        "resume_review_interrupt",
+        should_revise_resume,
         {
             "apply_feedback": "apply_feedback",
-            "persist_documents": "persist_documents",
+            "cl_review_interrupt": "cl_review_interrupt",
+            "persist_documents": "persist_documents",  # --resume-only approved
             "warn_and_exit": "warn_and_exit",
         },
     )
     graph.add_edge("apply_feedback", "write_resume")
+
+    # CL revision loop — runs after resume approved in full flow
+    # Also entry point for --cover-letter-only
+    graph.add_conditional_edges(
+        "cl_review_interrupt",
+        should_revise_cl,
+        {
+            "apply_cl_feedback": "apply_cl_feedback",
+            "persist_documents": "persist_documents",
+            "warn_and_exit": "warn_and_exit",
+        },
+    )
+    graph.add_edge("apply_cl_feedback", "write_cover_letter")
+
+    graph.add_edge("render_resume_docx", "render_cover_letter_docx")
+    graph.add_edge("render_cover_letter_docx", "persist_documents")
     graph.add_edge("persist_documents", END)
     graph.add_edge("warn_and_exit", END)
 

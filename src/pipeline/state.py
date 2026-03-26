@@ -167,7 +167,12 @@ class PipelineState(TypedDict):
     cover_letter_content: CoverLetterContent | None
     resume_path: str | None
     cover_letter_path: str | None
-    revision_round: int
+    revision_round: int        # resume revision counter
+    cl_revision_round: int     # cover letter revision counter
+
+    # Writer mode flags — set by CLI, drive conditional edges in graph
+    write_resume_only: bool        # skip CL loop entirely
+    write_cover_letter_only: bool  # skip resume loop entirely
 
     # Submission
     submission_status: SubmissionStatus | None
@@ -205,6 +210,9 @@ def empty_state() -> PipelineState:
         resume_path=None,
         cover_letter_path=None,
         revision_round=0,
+        cl_revision_round=0,
+        write_resume_only=False,
+        write_cover_letter_only=False,
         submission_status=None,
         submission_url=None,
         needs_file_upload=False,

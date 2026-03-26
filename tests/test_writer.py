@@ -233,27 +233,111 @@ def test_apply_feedback_revision_prompt_includes_formatting_rules(writer_state, 
     assert "Stack:" in prompt
 
 
+def test_apply_cl_feedback_increments_cl_revision_round(writer_state, mock_cl_llm_message, tmp_path):
+    from pipeline.agents.writer import apply_cl_feedback
+    from pipeline.state import CoverLetterContent
+
+    writer_state["cl_revision_round"] = 0
+    writer_state["human_feedback"] = "Make the opening stronger."
+    writer_state["cover_letter_content"] = CoverLetterContent(
+        opening="Dear Hiring Team,",
+        body_paragraphs=["I have experience."],
+        closing="Thank you.",
+    )
+
+    with patch("pipeline.agents.writer.anthropic.Anthropic") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = mock_cl_llm_message
+        with patch("pipeline.agents.writer.settings") as mock_settings:
+            mock_settings.llm_provider = "anthropic"
+            mock_settings.anthropic_api_key = "test-key"
+            mock_settings.max_revision_rounds = 3
+            result = apply_cl_feedback(writer_state)
+
+    assert result["cl_revision_round"] == 1
+    assert result["human_feedback"] is None
+    assert result.get("cover_letter_content") is not None
+
+
 def test_should_revise_routes_correctly():
-    from pipeline.agents.writer import should_revise
+    from pipeline.agents.writer import should_revise_resume
+    from pipeline.state import empty_state
+
+    with patch("pipeline.agents.writer.settings") as mock_settings:
+        mock_settings.max_revision_rounds = 3
+
+        # feedback + rounds remaining → revise resume
+        s = empty_state()
+        s["human_feedback"] = "Make it shorter."
+        s["revision_round"] = 1
+        assert should_revise_resume(s) == "apply_feedback"
+
+        # approved, default flow → go to CL review
+        s2 = empty_state()
+        s2["human_feedback"] = None
+        s2["revision_round"] = 0
+        assert should_revise_resume(s2) == "cl_review_interrupt"
+
+        # approved, --resume-only → skip CL, persist
+        s3 = empty_state()
+        s3["human_feedback"] = None
+        s3["revision_round"] = 0
+        s3["write_resume_only"] = True
+        assert should_revise_resume(s3) == "persist_documents"
+
+        # max rounds hit → warn
+        s4 = empty_state()
+        s4["human_feedback"] = "Still not right."
+        s4["revision_round"] = 3
+        assert should_revise_resume(s4) == "warn_and_exit"
+
+
+def test_should_revise_cl_routes_correctly():
+    from pipeline.agents.writer import should_revise_cl
     from pipeline.state import empty_state
 
     with patch("pipeline.agents.writer.settings") as mock_settings:
         mock_settings.max_revision_rounds = 3
 
         s = empty_state()
-        s["human_feedback"] = "Make it shorter."
-        s["revision_round"] = 1
-        assert should_revise(s) == "apply_feedback"
+        s["human_feedback"] = "More concise please."
+        s["cl_revision_round"] = 1
+        assert should_revise_cl(s) == "apply_cl_feedback"
 
         s2 = empty_state()
         s2["human_feedback"] = None
-        s2["revision_round"] = 0
-        assert should_revise(s2) == "persist_documents"
+        s2["cl_revision_round"] = 0
+        assert should_revise_cl(s2) == "persist_documents"
 
         s3 = empty_state()
-        s3["human_feedback"] = "Still not right."
-        s3["revision_round"] = 3
-        assert should_revise(s3) == "warn_and_exit"
+        s3["human_feedback"] = "Still bad."
+        s3["cl_revision_round"] = 3
+        assert should_revise_cl(s3) == "warn_and_exit"
+
+
+def test_should_write_resume_routes_correctly():
+    from pipeline.agents.writer import should_write_resume
+    from pipeline.state import empty_state
+
+    s = empty_state()
+    assert should_write_resume(s) == "write_resume"
+
+    s2 = empty_state()
+    s2["write_cover_letter_only"] = True
+    assert should_write_resume(s2) == "write_cover_letter"
+
+
+def test_should_write_cl_routes_correctly():
+    from pipeline.agents.writer import should_write_cl
+    from pipeline.state import empty_state
+
+    s = empty_state()
+    assert should_write_cl(s) == "write_cover_letter"
+
+    s2 = empty_state()
+    s2["write_resume_only"] = True
+    assert should_write_cl(s2) == "persist_documents"
 
 
 def test_write_resume_passes_api_key_to_anthropic(writer_state, mock_llm_message, tmp_path):
