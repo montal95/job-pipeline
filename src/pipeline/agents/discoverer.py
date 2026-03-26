@@ -305,9 +305,13 @@ def _transform_ziprecruiter_jobs(
 
 async def scrape_indeed(state: PipelineState) -> dict:
     """
-    Scrape Indeed via Playwright (headless=False, no auth).
-    httpx returns 403 — a real browser bypasses Indeed's bot detection.
-    The existing BS4 card selectors are reused unchanged.
+    Scrape Indeed via Playwright (headless=False).
+    Uses a saved auth session (playwright/.auth/indeed.json) if available —
+    this carries the CAPTCHA-solved cookie across runs. If no auth file exists,
+    falls back to an unauthenticated browser which will likely hit CAPTCHA.
+
+    Save a session first with:
+        python scripts/save_auth.py --platform indeed
     """
     if async_playwright is None:
         console.print("[yellow]⚠ Playwright not available — skipping Indeed[/yellow]")
@@ -321,15 +325,23 @@ async def scrape_indeed(state: PipelineState) -> dict:
         f"&l={quote_plus(params.location)}"
         f"&sort=date&limit={params.max_results_per_source}"
     )
+    auth_path = _get_auth_path("indeed")
     results: list[RawJobListing] = []
     try:
         import asyncio as _asyncio
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=False, channel="chrome")
-            page = await browser.new_page()
+            if auth_path.exists():
+                context = await browser.new_context(storage_state=str(auth_path))
+            else:
+                console.print(
+                    "[yellow]⚠ No Indeed auth file found — CAPTCHA likely. "
+                    "Run: python scripts/save_auth.py --platform indeed[/yellow]"
+                )
+                context = await browser.new_context()
+            page = await context.new_page()
             await page.goto(url, wait_until="domcontentloaded")
-            await _asyncio.sleep(3)  # let JS render job cards
-            # Wait for at least one card selector to appear
+            await _asyncio.sleep(3)
             for sel in ("div.job_seen_beacon", "div.tapItem", "li.css-5lfssm"):
                 try:
                     await page.wait_for_selector(sel, timeout=5000)
