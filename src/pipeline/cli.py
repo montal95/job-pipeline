@@ -377,14 +377,12 @@ def _collect_interview_answers(interrupt_val: dict) -> dict:
 
 def _collect_review_decision(interrupt_val: dict) -> str:
     """
-    Show resume preview (and cover letter preview if available) and prompt for decision.
-    In the full E2E flow both documents are shown together before submission.
-    With --resume-only, cover_letter_content will be absent and only the resume is shown.
+    Show resume preview and prompt for approve / abort / feedback.
+    Cover letter is shown separately at the cl_review_interrupt gate.
     Returns "approve", "abort", or a feedback string.
     """
     resume_preview = interrupt_val.get("resume_preview", "(no resume content)")
     resume_content = interrupt_val.get("resume_content")
-    cl_content = interrupt_val.get("cover_letter_content")
 
     console.print("\n[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]")
     console.print("[bold]RESUME PREVIEW[/bold]")
@@ -428,18 +426,6 @@ def _collect_review_decision(interrupt_val: dict) -> str:
             console.print()
     else:
         console.print(resume_preview)
-
-    # Cover letter — only shown in full flow (absent when --resume-only)
-    if cl_content and hasattr(cl_content, "opening"):
-        console.print("\n[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]")
-        console.print("[bold]COVER LETTER PREVIEW[/bold]")
-        console.print("[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]\n")
-        console.print(cl_content.opening, markup=False, highlight=False)
-        console.print()
-        for para in cl_content.body_paragraphs:
-            console.print(para, markup=False, highlight=False)
-            console.print()
-        console.print(cl_content.closing, markup=False, highlight=False)
 
     console.print("\n[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]\n")
     console.print("  [green]y / yes[/green] — accept and save")
