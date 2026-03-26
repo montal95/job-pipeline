@@ -142,15 +142,34 @@ docs/
 
 ---
 
-## Phase status
+## Roadmap
 
-| Phase | Scope | Status |
-|-------|-------|--------|
-| 0 | Scaffolding, state schema, DB, stub graphs, CLI | ✅ |
-| 1 | Discoverer — httpx scrapers, Send API, triage interrupt | ✅ |
-| 2 | Playwright auth sessions, save_auth.py | ✅ |
-| 3 | Writer — LLM calls, python-docx rendering, revision loop | ✅ |
-| 4 | Submitter — ATS strategies, form fill, hard submission gate | ✅ |
-| 5 | Tracker — Rich dashboard, follow-up scheduling, pipeline run | ✅ |
-| 6 | Discoverer expanded — additional sources, salary extraction | 🔄 In progress |
-| 7 | Polish, blog post, PR to development | 🔜 |
+### v1 — CLI pipeline (current)
+
+All core phases complete. Active work is on stability, source coverage, and known
+limitations before merging to `development`.
+
+| Area | Status | Notes |
+|------|--------|-------|
+| Scaffolding, state schema, DB, CLI | ✅ | |
+| Discoverer — Send fan-out, triage interrupt | ✅ | |
+| Playwright auth sessions | ✅ | LinkedIn working |
+| Writer — LLM generation, revision loop | ✅ | Requires API credits |
+| Submitter — ATS form fill, submission gate | ✅ | Greenhouse full; Workday manual fallback |
+| Tracker — Rich dashboard, follow-up scheduling | ✅ | |
+| Discoverer sources expanded | ✅ | LinkedIn, Dice, ZipRecruiter, Built In Chicago |
+| Indeed | 🅿️ | CAPTCHA blocks Playwright |
+| Wellfound | 🅿️ | IP-based bot detection — grep `WELLFOUND_PARKED` |
+| Submitter — ZipRecruiter auth | 🔜 | `save_auth.py --platform ziprecruiter` |
+| Submitter — Ashby ATS strategy | 🔜 | DOM fingerprint research needed |
+| PR: checkpoint branch → development | 🔜 | |
+
+### v2 — Web UI
+
+| Area | Notes |
+|------|-------|
+| FastAPI server + React dashboard | Replace CLI triage with browser UI |
+| Job card review with approve/skip/save | Visual triage instead of terminal prompts |
+| Document preview before submission | Side-by-side resume/cover letter viewer |
+| Pipeline run status in real time | WebSocket progress feed |
+| Playwright browser containerization | `storage_state` volume mount for auth inside Docker |
