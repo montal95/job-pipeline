@@ -44,6 +44,35 @@ from pipeline.state import (
     ResumeContent,
 )
 
+# ── LLM call router ────────────────────────────────────────────────────────────
+
+
+def _llm_call(prompt: str, max_tokens: int = 4096) -> str:
+    """
+    Route LLM call to Anthropic or Gemini based on settings.llm_provider.
+
+    Set LLM_PROVIDER=gemini in .env to use Gemini for dev/testing without
+    spending Anthropic credits. Get a free key at aistudio.google.com.
+    """
+    if settings.llm_provider == "gemini":
+        from google import genai
+        from pipeline.config import GEMINI_MODEL
+        client = genai.Client(api_key=settings.gemini_api_key)
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+        )
+        return response.text
+    else:
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        message = client.messages.create(
+            model=LLM_MODEL,
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return message.content[0].text
+
+
 # ── Stop words for gap extraction ──────────────────────────────────────────────
 
 _STOP_WORDS = {
@@ -541,14 +570,7 @@ def write_resume(state: PipelineState) -> dict:
     answers = state.get("interview_answers") or {}
 
     prompt = _build_resume_prompt(cv_text, job, answers)
-
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-    message = client.messages.create(
-        model=LLM_MODEL,
-        max_tokens=4096,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    raw = message.content[0].text
+    raw = _llm_call(prompt, max_tokens=4096)
     content = _parse_resume_json(raw)
 
     return {"resume_content": content}
@@ -570,14 +592,7 @@ def write_cover_letter(state: PipelineState) -> dict:
     answers = state.get("interview_answers") or {}
 
     prompt = _build_cover_letter_prompt(cv_text, job, answers)
-
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-    message = client.messages.create(
-        model=LLM_MODEL,
-        max_tokens=2048,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    raw = message.content[0].text
+    raw = _llm_call(prompt, max_tokens=2048)
     content = _parse_cover_letter_json(raw)
 
     return {"cover_letter_content": content}
@@ -674,13 +689,7 @@ def apply_feedback(state: PipelineState) -> dict:
         "No preamble, no markdown fences."
     )
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-    message = client.messages.create(
-        model=LLM_MODEL,
-        max_tokens=4096,
-        messages=[{"role": "user", "content": revision_prompt}],
-    )
-    raw = message.content[0].text
+    raw = _llm_call(revision_prompt, max_tokens=4096)
     content = _parse_resume_json(raw)
 
     return {

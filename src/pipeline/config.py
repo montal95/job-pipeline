@@ -2,8 +2,9 @@ from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-# Model pin — a version bump is a deliberate code change, not a config tweak.
+# Model pins — a version bump is a deliberate code change, not a config tweak.
 LLM_MODEL = "claude-sonnet-4-20250514"
+GEMINI_MODEL = "gemini-2.0-flash"
 
 
 class Settings(BaseSettings):
@@ -11,6 +12,10 @@ class Settings(BaseSettings):
 
     # Anthropic
     anthropic_api_key: str = "unset"
+
+    # Gemini (dev/test alternative — free tier via aistudio.google.com)
+    gemini_api_key: str = "unset"
+    llm_provider: str = "anthropic"  # "anthropic" | "gemini"
 
     # Paths
     cv_path: str = "./cv.pdf"
