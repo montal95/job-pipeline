@@ -443,11 +443,15 @@ def _collect_review_decision(interrupt_val: dict) -> str:
         console.print(cl_preview)
 
     console.print("\n[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]\n")
-    console.print("  [green]approve[/green] — accept and save")
-    console.print("  [red]abort[/red]   — discard and exit")
+    console.print("  [green]y / yes[/green] — accept and save")
+    console.print("  [red]n / no[/red]   — discard and exit")
     console.print("  [dim]<feedback>[/dim] — type feedback to revise\n")
 
-    decision = console.input("  Decision: ").strip()
+    decision = console.input("  Decision: ").strip().lower()
+    if decision in ("y", "yes"):
+        return "approve"
+    if decision in ("n", "no"):
+        return "abort"
     return decision if decision else "approve"
 
 
