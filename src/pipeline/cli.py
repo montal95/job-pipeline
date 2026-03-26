@@ -403,7 +403,7 @@ def _collect_review_decision(interrupt_val: dict) -> str:
             console.print(f"[bold yellow]Skills[/bold yellow]")
             for skill in resume_content.skills:
                 clean = skill.replace("**", "")
-                console.print(f"  {clean}", markup=False)
+                console.print(f"  {clean}", markup=False, highlight=False)
             console.print()
 
         for section in resume_content.sections:
@@ -421,9 +421,9 @@ def _collect_review_decision(interrupt_val: dict) -> str:
                     console.print(f"\n    [bold cyan]{clean}[/bold cyan]")
                 # Stack line
                 elif clean.startswith("Stack:"):
-                    console.print(f"    {clean}", markup=False)
+                    console.print(f"    {clean}", markup=False, highlight=False)
                 else:
-                    console.print(f"    • {clean}", markup=False)
+                    console.print(f"    • {clean}", markup=False, highlight=False)
             console.print()
     else:
         console.print(resume_preview)
@@ -433,12 +433,12 @@ def _collect_review_decision(interrupt_val: dict) -> str:
     console.print("[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]\n")
 
     if cl_content and hasattr(cl_content, "opening"):
-        console.print(cl_content.opening, markup=False)
+        console.print(cl_content.opening, markup=False, highlight=False)
         console.print()
         for para in cl_content.body_paragraphs:
-            console.print(para, markup=False)
+            console.print(para, markup=False, highlight=False)
             console.print()
-        console.print(cl_content.closing, markup=False)
+        console.print(cl_content.closing, markup=False, highlight=False)
     else:
         console.print(cl_preview)
 
