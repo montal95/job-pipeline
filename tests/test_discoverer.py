@@ -556,3 +556,130 @@ async def test_scrape_dice_no_playwright_returns_empty(monkeypatch):
     state = empty_state()
     state["search_params"] = SearchParams(query="engineer", location="Chicago, IL")
     assert await disc.scrape_dice(state) == {"raw_results": []}
+
+
+# ── Built In scraper ───────────────────────────────────────────────────────────
+#
+# Card structure confirmed via Claude in Chrome DevTools inspection (March 2026):
+#   [data-id="job-card"] lines: [company, title, date, workplace, location, salary?, level]
+#   Job URL: card.querySelectorAll('a')[2].pathname → /job/{slug}/{id}
+#   Salary format: "165K-195K Annually" or "95K/hr Hourly"
+
+BUILTIN_FIXTURE = [
+    {
+        "company": "Doximity",
+        "title": "Software Engineer (Ruby/Rails), Advertising Platform",
+        "workplace": "In-Office or Remote",
+        "location": "2 Locations",
+        "salary": "165K-195K Annually",
+        "url": "/job/software-engineer-ruby-rails-advertising-platform/8319205",
+    },
+    {
+        "company": "Forward Financing",
+        "title": "Principal Software Engineer (Ruby on Rails)",
+        "workplace": "Remote",
+        "location": "United States",  # vague — normalizes to blank
+        "salary": "200K-230K Annually",
+        "url": "/job/principal-software-engineer-ruby-on-rails/9999999",
+    },
+    {
+        "company": "PayPal",
+        "title": "Sr Software Engineer, Ruby on Rails",
+        "workplace": "In-Office",
+        "location": "Chicago, IL, USA",
+        "salary": "131K-194K Annually",
+        "url": "/job/sr-software-engineer-ruby-on-rails/8888888",
+    },
+    {
+        "company": "G2",
+        "title": "Software Engineer (Ruby on Rails)",
+        "workplace": "Remote",
+        "location": "US",
+        "salary": "",
+        "url": "/job/software-engineer-ruby-on-rails/7777777",
+    },
+    {
+        # Missing title — should be skipped
+        "company": "BadCo",
+        "title": "",
+        "workplace": "Remote",
+        "location": "USA",
+        "salary": "",
+        "url": "",
+    },
+]
+
+
+def test_transform_builtin_jobs_happy_path():
+    from pipeline.agents.discoverer import _transform_builtin_jobs
+    results = _transform_builtin_jobs(BUILTIN_FIXTURE)
+    assert len(results) == 4  # BadCo skipped (no title)
+    assert results[0].title == "Software Engineer (Ruby/Rails), Advertising Platform"
+    assert results[0].company == "Doximity"
+    assert results[0].source == "builtin"
+
+
+def test_transform_builtin_jobs_url_is_absolute():
+    from pipeline.agents.discoverer import _transform_builtin_jobs
+    results = _transform_builtin_jobs(BUILTIN_FIXTURE)
+    assert results[0].source_url == "https://builtin.com/job/software-engineer-ruby-rails-advertising-platform/8319205"
+
+
+def test_transform_builtin_jobs_salary_extracted():
+    from pipeline.agents.discoverer import _transform_builtin_jobs
+    results = _transform_builtin_jobs(BUILTIN_FIXTURE)
+    assert results[0].compensation_low == 165000
+    assert results[0].compensation_high == 195000
+
+
+def test_transform_builtin_jobs_remote_detected():
+    from pipeline.agents.discoverer import _transform_builtin_jobs
+    from pipeline.state import WorkplaceType
+    results = _transform_builtin_jobs(BUILTIN_FIXTURE)
+    assert results[1].workplace_type == WorkplaceType.REMOTE
+
+
+def test_transform_builtin_jobs_onsite_detected():
+    from pipeline.agents.discoverer import _transform_builtin_jobs
+    from pipeline.state import WorkplaceType
+    results = _transform_builtin_jobs(BUILTIN_FIXTURE)
+    assert results[2].workplace_type == WorkplaceType.ONSITE
+
+
+def test_transform_builtin_jobs_no_salary_is_none():
+    from pipeline.agents.discoverer import _transform_builtin_jobs
+    results = _transform_builtin_jobs(BUILTIN_FIXTURE)
+    assert results[3].compensation_low is None
+
+
+def test_transform_builtin_jobs_vague_location_normalized():
+    """USA, US, United States, '2 Locations' should all normalize to blank."""
+    from pipeline.agents.discoverer import _transform_builtin_jobs
+    results = _transform_builtin_jobs(BUILTIN_FIXTURE)
+    # Forward Financing has "United States" → should be blank
+    ff = next(r for r in results if r.company == "Forward Financing")
+    assert ff.location == ""
+    # PayPal has "Chicago, IL, USA" → should be kept as-is
+    pp = next(r for r in results if r.company == "PayPal")
+    assert pp.location == "Chicago, IL, USA"
+
+
+def test_transform_builtin_jobs_skips_empty_title():
+    from pipeline.agents.discoverer import _transform_builtin_jobs
+    results = _transform_builtin_jobs(BUILTIN_FIXTURE)
+    assert "BadCo" not in [r.company for r in results]
+
+
+def test_transform_builtin_jobs_empty_input():
+    from pipeline.agents.discoverer import _transform_builtin_jobs
+    assert _transform_builtin_jobs([]) == []
+
+
+@pytest.mark.asyncio
+async def test_scrape_builtin_no_playwright_returns_empty(monkeypatch):
+    """scrape_builtin returns empty gracefully when Playwright is unavailable."""
+    import pipeline.agents.discoverer as disc
+    monkeypatch.setattr(disc, "async_playwright", None)
+    state = empty_state()
+    state["search_params"] = SearchParams(query="engineer", location="Chicago, IL")
+    assert await disc.scrape_builtin(state) == {"raw_results": []}

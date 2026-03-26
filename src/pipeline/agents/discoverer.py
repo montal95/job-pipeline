@@ -613,11 +613,120 @@ async def scrape_ziprecruiter(state: PipelineState) -> dict:
 # ── Graph nodes ────────────────────────────────────────────────────────────────
 
 
+
+# ── Built In scraper (Playwright, no auth) ────────────────────────────────────
+
+
+def _transform_builtin_jobs(jobs_data: list[dict]) -> list[RawJobListing]:
+    """
+    Transform raw JS-extracted Built In card data into RawJobListing objects.
+    Pure function — no browser dependency, fully unit testable.
+
+    Each dict has the shape returned by the Playwright page.evaluate():
+      { company, title, workplace, location, salary, url }
+    Salary format: "165K-195K Annually" or None.
+    """
+    results: list[RawJobListing] = []
+    for job in jobs_data:
+        company = job.get("company", "") or "Unknown"
+        title = job.get("title", "")
+        if not title:
+            continue
+        workplace_raw = (job.get("workplace") or "").lower()
+        location_raw = job.get("location") or ""
+        # Keep specific city/state (e.g. "Chicago, IL, USA"), normalize vague country entries to blank
+        vague = {"usa", "us", "united states", "2 locations", ""}
+        location = "" if location_raw.strip().lower() in vague else location_raw
+        salary_str = job.get("salary") or ""
+        # Normalize Built In salary format — no $ signs, e.g. "165K-195K Annually"
+        # Convert to "$165K-$195K/yr" which _parse_compensation handles natively
+        if salary_str and not salary_str.startswith("$"):
+            salary_str = salary_str.replace(" Annually", "/yr").replace(" Hourly", "/hr")
+            salary_str = re.sub(r"(\d+(?:\.\d+)?K)", r"$\1", salary_str)
+        url = job.get("url") or ""
+        source_url = f"https://builtin.com{url}" if url.startswith("/") else url
+        comp_low, comp_high = _parse_compensation(salary_str)
+        workplace = (
+            WorkplaceType.REMOTE if "remote" in workplace_raw else
+            WorkplaceType.HYBRID if "hybrid" in workplace_raw else
+            WorkplaceType.ONSITE if "in-office" in workplace_raw or "onsite" in workplace_raw else None
+        )
+        results.append(RawJobListing(
+            source="builtin",
+            title=title,
+            company=company,
+            location=location,
+            source_url=source_url,
+            compensation_low=comp_low,
+            compensation_high=comp_high,
+            workplace_type=workplace,
+        ))
+    return results
+
+
+async def scrape_builtin(state: PipelineState) -> dict:
+    """
+    Scrape Built In Chicago via Playwright (headless=False, no auth).
+    Card structure confirmed via Chrome DevTools inspection (March 2026):
+      [data-id="job-card"] contains lines: [company, title, date, workplace, location, salary?, level]
+      Job URL: card.querySelectorAll('a')[2].pathname → /job/{slug}/{id}
+    """
+    if async_playwright is None:
+        console.print("[yellow]⚠ Playwright not available — skipping Built In[/yellow]")
+        return {"raw_results": []}
+
+    params = state["search_params"]
+    search_url = (
+        f"https://builtin.com/jobs/chicago"
+        f"?search={quote_plus(params.query)}"
+    )
+    results: list[RawJobListing] = []
+    jobs_data: list[dict] = []
+    try:
+        import asyncio as _asyncio
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=False, channel="chrome")
+            page = await browser.new_page()
+            await page.goto(search_url, wait_until="domcontentloaded")
+            await _asyncio.sleep(3)
+            try:
+                await page.wait_for_selector("[data-id='job-card']", timeout=10000)
+            except Exception:
+                console.print("[yellow]⚠ Built In: job cards did not appear[/yellow]")
+                await browser.close()
+                return {"raw_results": []}
+            jobs_data = await page.evaluate("""() => {
+                const cards = document.querySelectorAll('[data-id="job-card"]');
+                return Array.from(cards).map(card => {
+                    const lines = card.innerText.split('\\n').map(s => s.trim()).filter(Boolean);
+                    const links = card.querySelectorAll('a');
+                    const jobLink = Array.from(links).find(a => a.pathname.startsWith('/job/'));
+                    const salaryLine = lines.find(l => l.match(/\\d+K.*Annually|\\d+K.*Hourly/i));
+                    // Structure: [company, title, date, workplace, location, (salary?), level]
+                    return {
+                        company: lines[0] || '',
+                        title: lines[1] || '',
+                        workplace: lines[3] || '',
+                        location: lines[4] || '',
+                        salary: salaryLine || '',
+                        url: jobLink ? jobLink.pathname : '',
+                    };
+                });
+            }""")
+            await browser.close()
+        results = _transform_builtin_jobs(jobs_data[:params.max_results_per_source])
+    except Exception as exc:
+        console.print(f"[yellow]⚠ Built In scrape error: {exc}[/yellow]")
+    console.print(f"[dim]Built In: {len(results)} listings[/dim]")
+    return {"raw_results": results}
+
+
 SOURCE_NODE_MAP = {
     "indeed": "scrape_indeed",
     "dice": "scrape_dice",
     "linkedin": "scrape_linkedin",
     "ziprecruiter": "scrape_ziprecruiter",
+    "builtin": "scrape_builtin",
 }
 
 
@@ -783,13 +892,14 @@ def build_discoverer_graph() -> StateGraph:
     graph.add_node("scrape_dice", scrape_dice)
     graph.add_node("scrape_linkedin", scrape_linkedin)
     graph.add_node("scrape_ziprecruiter", scrape_ziprecruiter)
+    graph.add_node("scrape_builtin", scrape_builtin)
     graph.add_node("merge_results", merge_results)
     graph.add_node("triage_interrupt", triage_interrupt)
     graph.add_node("persist_to_db", persist_to_db)
 
     graph.set_entry_point("parse_search_params")
     graph.add_conditional_edges("parse_search_params", fan_out_sources)
-    for scraper in ("scrape_indeed", "scrape_dice", "scrape_linkedin", "scrape_ziprecruiter"):
+    for scraper in ("scrape_indeed", "scrape_dice", "scrape_linkedin", "scrape_ziprecruiter", "scrape_builtin"):
         graph.add_edge(scraper, "merge_results")
     graph.add_edge("merge_results", "triage_interrupt")
     graph.add_edge("triage_interrupt", "persist_to_db")
