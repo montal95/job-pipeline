@@ -20,9 +20,18 @@ Usage (after `uv pip install -e .`):
 from __future__ import annotations
 
 import asyncio
+import io
 import os
+import sys
 import warnings
 import logging
+
+# Force UTF-8 output on Windows — prevents UnicodeEncodeError on rich unicode
+# symbols (✓, ✗, →, etc.) when the console code page is cp1252.
+if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if sys.platform == "win32" and hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 # TODO: Remove these suppression blocks once pipeline.state types are properly registered
 # in LangGraph's msgpack allow-list. Proper fix: register via `allowed_msgpack_modules`
@@ -48,7 +57,7 @@ from rich.console import Console
 from rich.table import Table
 from rich import box
 
-console = Console()
+console = Console(legacy_windows=False)
 app = typer.Typer(
     name="pipeline",
     help="LangGraph multi-agent job application pipeline.",
