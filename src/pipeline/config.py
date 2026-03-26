@@ -4,7 +4,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Model pins — a version bump is a deliberate code change, not a config tweak.
 LLM_MODEL = "claude-sonnet-4-20250514"
-GEMINI_MODEL = "gemini-2.0-flash"
 
 
 class Settings(BaseSettings):
@@ -16,6 +15,7 @@ class Settings(BaseSettings):
     # Gemini (dev/test alternative — free tier via aistudio.google.com)
     gemini_api_key: str = "unset"
     llm_provider: str = "anthropic"  # "anthropic" | "gemini"
+    gemini_model: str = "gemini-2.5-flash"  # override in .env if needed
 
     # Paths
     cv_path: str = "./cv.pdf"
