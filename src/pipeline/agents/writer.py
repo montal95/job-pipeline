@@ -29,6 +29,7 @@ import re
 from pathlib import Path
 
 import anthropic
+from rich.console import Console
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -44,6 +45,8 @@ from pipeline.state import (
     ResumeContent,
 )
 
+console = Console()
+
 # ── LLM call router ────────────────────────────────────────────────────────────
 
 
@@ -56,10 +59,12 @@ def _llm_call(prompt: str, max_tokens: int = 4096) -> str:
     """
     if settings.llm_provider == "gemini":
         from google import genai
-        from pipeline.config import GEMINI_MODEL
         client = genai.Client(api_key=settings.gemini_api_key)
+        model_id = settings.gemini_model
+        if not model_id.startswith("models/"):
+            model_id = f"models/{model_id}"
         response = client.models.generate_content(
-            model=GEMINI_MODEL,
+            model=model_id,
             contents=prompt,
         )
         return response.text
@@ -155,16 +160,75 @@ def _build_resume_prompt(
         if answers
         else "None provided."
     )
-    return (
-        f"You are an expert resume writer. Tailor the candidate's CV for the following role.\n\n"
-        f"TARGET ROLE: {job.title} at {job.company} ({job.location})\n\n"
-        f"JOB DESCRIPTION:\n{job.description or 'Not provided.'}\n\n"
-        f"CANDIDATE CV:\n{cv_text}\n\n"
-        f"PRE-WRITE INTERVIEW ANSWERS:\n{answers_block}\n\n"
-        "Return ONLY a valid JSON object matching this schema — no preamble, no markdown fences:\n"
-        '{"name": str, "contact": str, "summary": str, '
-        '"sections": [{"heading": str, "bullets": [str]}], "skills": [str]}'
-    )
+    return f"""You are an expert resume writer. Tailor the candidate's CV for the target role below.
+
+TARGET ROLE: {job.title} at {job.company} ({job.location})
+
+JOB DESCRIPTION:
+{job.description or 'Not provided.'}
+
+CANDIDATE CV:
+{cv_text}
+
+PRE-WRITE INTERVIEW ANSWERS:
+{answers_block}
+
+INSTRUCTIONS — follow exactly:
+
+1. Return ONLY a valid JSON object. No preamble, no markdown fences, no explanation.
+2. No markdown inside any string value. No **bold**, no *italic*, no # headers, no [brackets].
+3. "contact" must be exactly two lines separated by \\n:
+   Line 1: city · phone · email
+   Line 2: GitHub URL · LinkedIn URL · Portfolio URL · Blog URL
+4. "skills" is a flat list of plain strings — one per category, no markdown, no bold.
+   Format each as: "Category Label: item1, item2, item3"
+   Example: "Backend: Ruby on Rails, Node.js, Express.js"
+   NOT: "**Backend:** Ruby on Rails" — no asterisks, no brackets, no special characters.
+5. "sections" contains these sections in this exact order:
+   a. One section with heading "EXPERIENCE" — its bullets encode work history using this pattern:
+      - First bullet for each employer: "Company · Location | Role Title | Start – End"
+      - Second bullet for each project under that employer: "Project Name — one line description"
+      - Remaining bullets for that project: one responsibility per bullet (plain sentence, no markdown)
+      - Final bullet for each project: "Stack: Tech1, Tech2, Tech3"
+      - Then repeat for the next employer
+   b. One section with heading "EDUCATION" — one bullet per degree: "Institution · Degree Year"
+6. Do not create any other top-level sections. Do not put skills inside sections.
+
+EXAMPLE of correct JSON shape (truncated for illustration):
+{{
+  "name": "Jane Smith",
+  "contact": "Chicago, IL · 555-1234 · jane@example.com",
+  "summary": "Backend engineer with 5 years...",
+  "skills": [
+    "Backend: Ruby on Rails, Node.js",
+    "Cloud & Infra: AWS (EC2, S3), Docker",
+    "Databases: PostgreSQL, Redis"
+  ],
+  "sections": [
+    {{
+      "heading": "EXPERIENCE",
+      "bullets": [
+        "Acme Corp · Chicago, IL | Software Engineer | Jun 2021 – Aug 2025",
+        "Payments Platform — Core payment processing service",
+        "Built RESTful API endpoints handling 50K daily transactions.",
+        "Reduced latency by 40% through Redis caching layer.",
+        "Stack: Ruby on Rails, PostgreSQL, Redis, AWS",
+        "Side Project Co · Remote | Freelance Developer | Jan 2020 – May 2021",
+        "E-commerce Integration — Custom Shopify API connector",
+        "Delivered full-stack integration on time under tight deadline.",
+        "Stack: Node.js, React, PostgreSQL"
+      ]
+    }},
+    {{
+      "heading": "EDUCATION",
+      "bullets": [
+        "State University · B.S. Computer Science 2019"
+      ]
+    }}
+  ]
+}}
+
+Now produce the tailored JSON for the candidate and role above:"""
 
 
 def _build_cover_letter_prompt(
@@ -178,15 +242,39 @@ def _build_cover_letter_prompt(
         if answers
         else "None provided."
     )
-    return (
-        f"You are an expert cover letter writer. Write a compelling, concise cover letter.\n\n"
-        f"TARGET ROLE: {job.title} at {job.company} ({job.location})\n\n"
-        f"JOB DESCRIPTION:\n{job.description or 'Not provided.'}\n\n"
-        f"CANDIDATE CV:\n{cv_text}\n\n"
-        f"PRE-WRITE INTERVIEW ANSWERS:\n{answers_block}\n\n"
-        "Return ONLY a valid JSON object matching this schema — no preamble, no markdown fences:\n"
-        '{"opening": str, "body_paragraphs": [str], "closing": str}'
-    )
+    return f"""You are an expert cover letter writer. Write a compelling, concise cover letter.
+
+TARGET ROLE: {job.title} at {job.company} ({job.location})
+
+JOB DESCRIPTION:
+{job.description or 'Not provided.'}
+
+CANDIDATE CV:
+{cv_text}
+
+PRE-WRITE INTERVIEW ANSWERS:
+{answers_block}
+
+INSTRUCTIONS — follow exactly:
+
+1. Return ONLY a valid JSON object. No preamble, no markdown fences, no explanation.
+2. No markdown inside any string value. No **bold**, no *italic*, no bullet points.
+3. "opening" is the first paragraph — address the hiring team and state the role and your fit.
+4. "body_paragraphs" is a list of 2–3 paragraphs — each a plain prose string with no line breaks inside.
+5. "closing" is the final paragraph — express enthusiasm and call to action.
+6. Keep the total length to 3–4 paragraphs. Concise and specific beats long and generic.
+7. Do not start any paragraph with "I am writing to" — use a stronger opener.
+8. The opening paragraph must lead with a specific, concrete hook — a relevant achievement,
+   a direct connection to the company's product, or a sharp statement of fit. Avoid
+   generic openers like "I am excited to apply" or "My passion for X draws me to Y".
+   Strong examples:
+   - "Four years of managing Jenkins pipelines and AWS infrastructure in a regulated
+     environment maps directly to what Docker's platform team ships every day."
+   - "Building an RBAC authorization system serving 10,000+ employees taught me what
+     production-grade identity infrastructure actually requires — and why Docker's approach
+     to developer tooling matters."
+
+Return the JSON now:"""
 
 
 def _parse_resume_json(raw: str) -> ResumeContent:
@@ -570,6 +658,7 @@ def write_resume(state: PipelineState) -> dict:
     answers = state.get("interview_answers") or {}
 
     prompt = _build_resume_prompt(cv_text, job, answers)
+    console.print("[dim]⏳ Generating resume with LLM...[/dim]")
     raw = _llm_call(prompt, max_tokens=4096)
     content = _parse_resume_json(raw)
 
@@ -592,6 +681,7 @@ def write_cover_letter(state: PipelineState) -> dict:
     answers = state.get("interview_answers") or {}
 
     prompt = _build_cover_letter_prompt(cv_text, job, answers)
+    console.print("[dim]⏳ Generating cover letter with LLM...[/dim]")
     raw = _llm_call(prompt, max_tokens=2048)
     content = _parse_cover_letter_json(raw)
 
@@ -651,6 +741,8 @@ def review_interrupt(state: PipelineState) -> dict:
     feedback = interrupt({
         "resume_preview": resume_preview,
         "cover_letter_preview": cover_letter_preview,
+        "resume_content": resume_content,
+        "cover_letter_content": cl_content,
         "message": "Review content preview. Reply: 'approve', 'abort', or type feedback.",
     })
 
@@ -689,6 +781,7 @@ def apply_feedback(state: PipelineState) -> dict:
         "No preamble, no markdown fences."
     )
 
+    console.print("[dim]⏳ Applying feedback with LLM...[/dim]")
     raw = _llm_call(revision_prompt, max_tokens=4096)
     content = _parse_resume_json(raw)
 

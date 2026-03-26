@@ -123,7 +123,7 @@ class ResumeContent(BaseModel):
     contact: str
     summary: str
     sections: list[ResumeSection]
-    skills: list[str]
+    skills: list[str] = []
 
 
 class CoverLetterContent(BaseModel):

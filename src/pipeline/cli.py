@@ -377,16 +377,73 @@ def _collect_interview_answers(interrupt_val: dict) -> dict:
 
 def _collect_review_decision(interrupt_val: dict) -> str:
     """
-    Show generated doc paths and prompt the user to approve, abort, or provide feedback.
+    Show generated content preview and prompt the user to approve, abort, or provide feedback.
     Returns "approve", "abort", or a feedback string.
     """
-    resume_path = interrupt_val.get("resume_path")
-    cl_path = interrupt_val.get("cover_letter_path")
+    resume_preview = interrupt_val.get("resume_preview", "(no resume content)")
+    cl_preview = interrupt_val.get("cover_letter_preview", "(no cover letter content)")
+    resume_content = interrupt_val.get("resume_content")
+    cl_content = interrupt_val.get("cover_letter_content")
 
-    console.print("\n[bold]Documents ready for review:[/bold]")
-    console.print(f"  Resume:       [cyan]{resume_path or 'not found'}[/cyan]")
-    console.print(f"  Cover letter: [cyan]{cl_path or 'not found'}[/cyan]")
-    console.print("\n  [green]approve[/green] — submit as-is")
+    console.print("\n[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]")
+    console.print("[bold]RESUME PREVIEW[/bold]")
+    console.print("[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]\n")
+
+    if resume_content and hasattr(resume_content, "name"):
+        console.print(f"[bold]{resume_content.name}[/bold]")
+        # Contact: two lines split on \n — line 1: city/phone/email, line 2: socials
+        contact_lines = resume_content.contact.split("\\n") if "\\n" in resume_content.contact else resume_content.contact.split("\n")
+        for line in contact_lines:
+            console.print(f"[dim]{line.strip()}[/dim]")
+        console.print()
+        console.print(f"[bold]Summary[/bold]\n{resume_content.summary}\n")
+
+        # Skills — escape Rich markup brackets, strip any leftover ** markers
+        if resume_content.skills:
+            console.print(f"[bold yellow]Skills[/bold yellow]")
+            for skill in resume_content.skills:
+                clean = skill.replace("**", "").replace("[", "\\[")
+                console.print(f"  {clean}")
+            console.print()
+
+        for section in resume_content.sections:
+            # Skip empty sections (e.g. LLM put "SKILLS & TECHNOLOGIES" as a section with no bullets)
+            if not section.bullets:
+                continue
+            console.print(f"[bold yellow]{section.heading}[/bold yellow]")
+            for bullet in section.bullets:
+                clean = bullet.replace("**", "").strip()
+                # Employer line: "Company · Location | Role | Dates"
+                if "|" in clean and "·" in clean:
+                    console.print(f"\n  [bold]{clean}[/bold]")
+                # Project line: "Project Name — description"
+                elif " — " in clean:
+                    console.print(f"\n    [bold cyan]{clean}[/bold cyan]")
+                # Stack line
+                elif clean.startswith("Stack:"):
+                    console.print(f"    [dim]{clean}[/dim]")
+                else:
+                    console.print(f"    • {clean}")
+            console.print()
+    else:
+        console.print(resume_preview)
+
+    console.print("[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]")
+    console.print("[bold]COVER LETTER PREVIEW[/bold]")
+    console.print("[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]\n")
+
+    if cl_content and hasattr(cl_content, "opening"):
+        console.print(cl_content.opening)
+        console.print()
+        for para in cl_content.body_paragraphs:
+            console.print(para)
+            console.print()
+        console.print(cl_content.closing)
+    else:
+        console.print(cl_preview)
+
+    console.print("\n[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]\n")
+    console.print("  [green]approve[/green] — accept and save")
     console.print("  [red]abort[/red]   — discard and exit")
     console.print("  [dim]<feedback>[/dim] — type feedback to revise\n")
 
@@ -457,7 +514,7 @@ async def _write(job_id: str):
                 except GraphInterrupt:
                     pass
 
-            elif "resume_path" in interrupt_data:
+            elif "resume_preview" in interrupt_data:
                 # review_interrupt gate
                 decision = _collect_review_decision(interrupt_data)
                 if decision.strip().lower() == "abort":
