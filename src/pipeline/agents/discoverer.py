@@ -536,15 +536,16 @@ async def scrape_linkedin(state: PipelineState) -> dict:
 
 async def scrape_ziprecruiter(state: PipelineState) -> dict:
     """
-    Scrape ZipRecruiter job search via Playwright with a saved auth session.
-    Windows only. Requires playwright/.auth/ziprecruiter.json from save_auth.py.
+    Scrape ZipRecruiter via Playwright (headless=False, no auth required).
+    Public job search works without login. Bot detection blocks authenticated
+    sessions but the public search page renders job cards freely.
+
+    Card structure (confirmed via DevTools inspection):
+      div[class*="job_result"] contains:
+      lines: [company, title, location (city · workplace_type), salary?, ...]
     """
-    auth_path = _get_auth_path("ziprecruiter")
-    if not auth_path.exists():
-        console.print(
-            "[yellow]⚠ ZipRecruiter auth file not found. "
-            "Run: python scripts/save_auth.py --platform ziprecruiter[/yellow]"
-        )
+    if async_playwright is None:
+        console.print("[yellow]⚠ Playwright not available — skipping ZipRecruiter[/yellow]")
         return {"raw_results": []}
 
     params = state["search_params"]
@@ -554,23 +555,67 @@ async def scrape_ziprecruiter(state: PipelineState) -> dict:
         f"&location={quote_plus(params.location)}"
     )
     results: list[RawJobListing] = []
+    jobs_data: list[dict] = []
     try:
+        import asyncio as _asyncio
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, channel="chrome")
-            context = await browser.new_context(storage_state=str(auth_path))
-            page = await context.new_page()
+            browser = await p.chromium.launch(headless=False, channel="chrome")
+            page = await browser.new_page()
             await page.goto(search_url, wait_until="domcontentloaded")
-            await page.wait_for_selector("article.job_result", timeout=10000)
-            if _is_login_redirect(page.url, "ziprecruiter"):
-                console.print(
-                    "[yellow]⚠ ZipRecruiter session expired. "
-                    "Run: python scripts/save_auth.py --platform ziprecruiter[/yellow]"
-                )
+            await _asyncio.sleep(3)
+            try:
+                await page.wait_for_selector("div[class*='job_result']", timeout=10000)
+            except Exception:
+                console.print("[yellow]⚠ ZipRecruiter: job cards did not appear[/yellow]")
                 await browser.close()
                 return {"raw_results": []}
-            html = await page.content()
+            jobs_data = await page.evaluate("""() => {
+                const cards = document.querySelectorAll('div[class*="job_result"]');
+                return Array.from(cards).map(card => {
+                    const lines = card.innerText.split('\\n').map(s => s.trim()).filter(Boolean);
+                    const link = card.querySelector('a[class*="job_link"], h2 a, a[class*="title"]')
+                                 || card.querySelector('a');
+                    return {
+                        company: lines[0] || '',
+                        title: lines[1] || '',
+                        location: lines[2] || '',
+                        salary: lines.find(l => l.includes('$')) || '',
+                        url: link ? link.href : '',
+                    };
+                });
+            }""")
             await browser.close()
-        results = _parse_ziprecruiter_cards(html)
+
+        for job in jobs_data[:params.max_results_per_source]:
+            company = job.get("company", "") or "Unknown"
+            title = job.get("title", "")
+            location_raw = job.get("location", "") or params.location
+            # Location format: "Chicago, IL · Remote" — split on bullet
+            location_parts = [p.strip() for p in location_raw.split("·")]
+            location = location_parts[0] if location_parts else location_raw
+            workplace_hint = location_parts[1].lower() if len(location_parts) > 1 else ""
+            salary_str = job.get("salary", "")
+            url = job.get("url", "") or search_url
+            comp_low, comp_high = _parse_compensation(salary_str)
+            if not comp_low:
+                comp_low, comp_high = _extract_salary_from_description(salary_str + "\n" + title)
+            workplace = (
+                WorkplaceType.REMOTE if "remote" in workplace_hint else
+                WorkplaceType.HYBRID if "hybrid" in workplace_hint else
+                WorkplaceType.ONSITE if "on-site" in workplace_hint or "onsite" in workplace_hint else None
+            )
+            if not title or not company:
+                continue
+            results.append(RawJobListing(
+                source="ziprecruiter",
+                title=title,
+                company=company,
+                location=location,
+                source_url=url,
+                compensation_low=comp_low,
+                compensation_high=comp_high,
+                workplace_type=workplace,
+            ))
     except Exception as exc:
         console.print(f"[yellow]⚠ ZipRecruiter scrape error: {exc}[/yellow]")
     console.print(f"[dim]ZipRecruiter: {len(results)} listings[/dim]")

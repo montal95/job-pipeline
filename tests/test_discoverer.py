@@ -414,8 +414,14 @@ async def test_scrape_linkedin_missing_auth_returns_empty(monkeypatch, tmp_path)
 
 @pytest.mark.asyncio
 async def test_scrape_ziprecruiter_missing_auth_returns_empty(monkeypatch, tmp_path):
+    """
+    ZipRecruiter discoverer no longer requires auth — public search works.
+    Auth infrastructure (_get_auth_path, save_auth.py) is retained for the
+    submitter which needs a logged-in session to apply. This test verifies
+    graceful return when Playwright is unavailable, consistent with scrape_dice.
+    """
     import pipeline.agents.discoverer as disc
-    monkeypatch.setattr(disc, "_get_auth_path", lambda p: tmp_path / "nonexistent.json")
+    monkeypatch.setattr(disc, "async_playwright", None)
     state = empty_state()
     state["search_params"] = SearchParams(query="engineer", location="Chicago, IL")
     assert await disc.scrape_ziprecruiter(state) == {"raw_results": []}
@@ -471,21 +477,6 @@ async def test_scrape_linkedin_stale_session_returns_empty(monkeypatch, tmp_path
     state = empty_state()
     state["search_params"] = SearchParams(query="engineer", location="Chicago, IL")
     assert await disc.scrape_linkedin(state) == {"raw_results": []}
-
-
-@pytest.mark.asyncio
-async def test_scrape_ziprecruiter_stale_session_returns_empty(monkeypatch, tmp_path):
-    import pipeline.agents.discoverer as disc
-    auth_file = tmp_path / "ziprecruiter.json"
-    auth_file.write_text("{}")
-    monkeypatch.setattr(disc, "_get_auth_path", lambda p: auth_file)
-    monkeypatch.setattr(
-        disc, "async_playwright",
-        lambda: _FakePlaywright(_FakePage("https://www.ziprecruiter.com/login"))
-    )
-    state = empty_state()
-    state["search_params"] = SearchParams(query="engineer", location="Chicago, IL")
-    assert await disc.scrape_ziprecruiter(state) == {"raw_results": []}
 
 
 # ── Dice scraper ───────────────────────────────────────────────────────────────
