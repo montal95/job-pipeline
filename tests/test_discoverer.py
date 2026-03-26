@@ -377,27 +377,93 @@ def test_parse_linkedin_cards_auth_dom_takes_priority_over_public():
 
 
 # ── ZipRecruiter card parser ───────────────────────────────────────────────────
+#
+# The scraper switched from BS4 HTML parsing to Playwright JS extraction.
+# Tests now target _transform_ziprecruiter_jobs() which is the pure transform
+# function extracted from the scraper. The fixture is a list of dicts matching
+# the shape returned by the page.evaluate() call in scrape_ziprecruiter:
+#   { company, title, location (city · workplace_type), salary, url }
+
+ZR_FIXTURE = [
+    {
+        "company": "YO IT CONSULTING",
+        "title": "Ruby on Rails Developer - LLM",
+        "location": "Chicago, IL · Remote",
+        "salary": "$105.60K - $144.70K/yr",
+        "url": "https://www.ziprecruiter.com/jobs/yo-it-consulting/ruby-on-rails",
+    },
+    {
+        "company": "AppFolio",
+        "title": "Sr. Software Engineer - Accounting",
+        "location": "Chicago, IL · On-site",
+        "salary": "$126K - $166K/yr",
+        "url": "https://www.ziprecruiter.com/jobs/appfolio/sr-software-engineer",
+    },
+    {
+        "company": "Halo",
+        "title": "Software Engineer",
+        "location": "Chicago, IL",
+        "salary": "",
+        "url": "https://www.ziprecruiter.com/jobs/halo/software-engineer",
+    },
+    {
+        # Missing title — should be skipped
+        "company": "BadCard Inc",
+        "title": "",
+        "location": "Chicago, IL",
+        "salary": "",
+        "url": "",
+    },
+]
 
 
-def test_parse_ziprecruiter_cards_happy_path():
-    from pipeline.agents.discoverer import _parse_ziprecruiter_cards
-    results = _parse_ziprecruiter_cards(_load_fixture("ziprecruiter_job_cards.html"))
-    assert len(results) == 2
-    assert results[0].title == "Senior Software Engineer"
-    assert results[0].company == "Acme Corp"
+def test_transform_ziprecruiter_jobs_happy_path():
+    from pipeline.agents.discoverer import _transform_ziprecruiter_jobs
+    results = _transform_ziprecruiter_jobs(ZR_FIXTURE)
+    assert len(results) == 3  # BadCard skipped (no title)
+    assert results[0].title == "Ruby on Rails Developer - LLM"
+    assert results[0].company == "YO IT CONSULTING"
     assert results[0].source == "ziprecruiter"
 
 
-def test_parse_ziprecruiter_cards_empty_page():
-    from pipeline.agents.discoverer import _parse_ziprecruiter_cards
-    assert _parse_ziprecruiter_cards("<html><body></body></html>") == []
+def test_transform_ziprecruiter_jobs_salary_extracted():
+    from pipeline.agents.discoverer import _transform_ziprecruiter_jobs
+    results = _transform_ziprecruiter_jobs(ZR_FIXTURE)
+    assert results[0].compensation_low == 105600
+    assert results[0].compensation_high == 144700
 
 
-def test_parse_ziprecruiter_cards_salary_range():
-    from pipeline.agents.discoverer import _parse_ziprecruiter_cards
-    results = _parse_ziprecruiter_cards(_load_fixture("ziprecruiter_job_cards.html"))
-    assert results[0].compensation_low == 120000
-    assert results[0].compensation_high == 150000
+def test_transform_ziprecruiter_jobs_location_splits_on_bullet():
+    """Location 'Chicago, IL · Remote' should split — city goes to location, type to workplace."""
+    from pipeline.agents.discoverer import _transform_ziprecruiter_jobs
+    from pipeline.state import WorkplaceType
+    results = _transform_ziprecruiter_jobs(ZR_FIXTURE)
+    assert results[0].location == "Chicago, IL"
+    assert results[0].workplace_type == WorkplaceType.REMOTE
+
+
+def test_transform_ziprecruiter_jobs_onsite_detected():
+    from pipeline.agents.discoverer import _transform_ziprecruiter_jobs
+    from pipeline.state import WorkplaceType
+    results = _transform_ziprecruiter_jobs(ZR_FIXTURE)
+    assert results[1].workplace_type == WorkplaceType.ONSITE
+
+
+def test_transform_ziprecruiter_jobs_no_salary_is_none():
+    from pipeline.agents.discoverer import _transform_ziprecruiter_jobs
+    results = _transform_ziprecruiter_jobs(ZR_FIXTURE)
+    assert results[2].compensation_low is None
+
+
+def test_transform_ziprecruiter_jobs_skips_empty_title():
+    from pipeline.agents.discoverer import _transform_ziprecruiter_jobs
+    results = _transform_ziprecruiter_jobs(ZR_FIXTURE)
+    assert "BadCard Inc" not in [r.company for r in results]
+
+
+def test_transform_ziprecruiter_jobs_empty_input():
+    from pipeline.agents.discoverer import _transform_ziprecruiter_jobs
+    assert _transform_ziprecruiter_jobs([]) == []
 
 
 # ── Scraper node behavior — missing auth ──────────────────────────────────────

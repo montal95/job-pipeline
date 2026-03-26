@@ -244,40 +244,55 @@ def _parse_linkedin_cards(html: str) -> list[RawJobListing]:
 
 def _parse_ziprecruiter_cards(html: str) -> list[RawJobListing]:
     """
-    Parse ZipRecruiter job search results HTML into RawJobListing objects.
-    Pure function — no browser dependency, fully unit testable.
+    DEPRECATED: Previously used BS4 HTML parsing. Retained as a no-op stub
+    so import references don't break. Actual parsing is done via Playwright
+    JS extraction — see _transform_ziprecruiter_jobs().
     """
-    soup = BeautifulSoup(html, "html.parser")
+    return []
+
+
+def _transform_ziprecruiter_jobs(
+    jobs_data: list[dict], default_location: str = ""
+) -> list[RawJobListing]:
+    """
+    Transform raw JS-extracted ZipRecruiter card data into RawJobListing objects.
+    Pure function — no browser dependency, fully unit testable.
+
+    Each dict in jobs_data has the shape returned by the Playwright page.evaluate():
+      {
+        'company': str,
+        'title': str,
+        'location': str,   # e.g. "Chicago, IL · Remote"
+        'salary': str,     # e.g. "$105.60K - $144.70K/yr" or ""
+        'url': str,
+      }
+    """
     results: list[RawJobListing] = []
-    for card in soup.select("article.job_result"):
-        title_el = card.select_one("h2.job_title a.job_link")
-        company_el = card.select_one("a.company_name")
-        location_el = card.select_one("span.location")
-        salary_el = card.select_one("span.compensation")
-        if not (title_el and company_el):
+    for job in jobs_data:
+        company = job.get("company", "") or "Unknown"
+        title = job.get("title", "")
+        if not title or not company or company == "Unknown" and not title:
             continue
-        title = title_el.get_text(strip=True)
-        company = company_el.get_text(strip=True)
-        location = location_el.get_text(strip=True) if location_el else ""
-        href = title_el.get("href", "")
-        source_url = (
-            f"https://www.ziprecruiter.com{href}" if href.startswith("/") else href
-        )
-        comp_low, comp_high = _parse_compensation(
-            salary_el.get_text(strip=True) if salary_el else ""
-        )
-        loc_lower = location.lower()
+        location_raw = job.get("location", "") or default_location
+        location_parts = [p.strip() for p in location_raw.split("·")]
+        location = location_parts[0] if location_parts else location_raw
+        workplace_hint = location_parts[1].lower() if len(location_parts) > 1 else ""
+        salary_str = job.get("salary", "")
+        url = job.get("url", "")
+        comp_low, comp_high = _parse_compensation(salary_str)
+        if not comp_low:
+            comp_low, comp_high = _extract_salary_from_description(salary_str + "\n" + title)
         workplace = (
-            WorkplaceType.REMOTE if "remote" in loc_lower
-            else WorkplaceType.HYBRID if "hybrid" in loc_lower
-            else None
+            WorkplaceType.REMOTE if "remote" in workplace_hint else
+            WorkplaceType.HYBRID if "hybrid" in workplace_hint else
+            WorkplaceType.ONSITE if "on-site" in workplace_hint or "onsite" in workplace_hint else None
         )
         results.append(RawJobListing(
             source="ziprecruiter",
             title=title,
             company=company,
-            location=location.replace("(Remote)", "").replace("(Hybrid)", "").strip(),
-            source_url=source_url,
+            location=location,
+            source_url=url,
             compensation_low=comp_low,
             compensation_high=comp_high,
             workplace_type=workplace,
@@ -586,36 +601,9 @@ async def scrape_ziprecruiter(state: PipelineState) -> dict:
             }""")
             await browser.close()
 
-        for job in jobs_data[:params.max_results_per_source]:
-            company = job.get("company", "") or "Unknown"
-            title = job.get("title", "")
-            location_raw = job.get("location", "") or params.location
-            # Location format: "Chicago, IL · Remote" — split on bullet
-            location_parts = [p.strip() for p in location_raw.split("·")]
-            location = location_parts[0] if location_parts else location_raw
-            workplace_hint = location_parts[1].lower() if len(location_parts) > 1 else ""
-            salary_str = job.get("salary", "")
-            url = job.get("url", "") or search_url
-            comp_low, comp_high = _parse_compensation(salary_str)
-            if not comp_low:
-                comp_low, comp_high = _extract_salary_from_description(salary_str + "\n" + title)
-            workplace = (
-                WorkplaceType.REMOTE if "remote" in workplace_hint else
-                WorkplaceType.HYBRID if "hybrid" in workplace_hint else
-                WorkplaceType.ONSITE if "on-site" in workplace_hint or "onsite" in workplace_hint else None
-            )
-            if not title or not company:
-                continue
-            results.append(RawJobListing(
-                source="ziprecruiter",
-                title=title,
-                company=company,
-                location=location,
-                source_url=url,
-                compensation_low=comp_low,
-                compensation_high=comp_high,
-                workplace_type=workplace,
-            ))
+        results = _transform_ziprecruiter_jobs(
+            jobs_data[:params.max_results_per_source], params.location
+        )
     except Exception as exc:
         console.print(f"[yellow]⚠ ZipRecruiter scrape error: {exc}[/yellow]")
     console.print(f"[dim]ZipRecruiter: {len(results)} listings[/dim]")
