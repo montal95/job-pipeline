@@ -777,8 +777,19 @@ def apply_feedback(state: PipelineState) -> dict:
         f"The candidate has reviewed their tailored resume and provided this feedback:\n\n"
         f"FEEDBACK: {feedback}\n\n"
         f"Here is the current resume JSON:\n{prev_json}\n\n"
-        "Apply the feedback and return ONLY an updated JSON object with the same schema. "
-        "No preamble, no markdown fences."
+        "Apply the feedback and return ONLY an updated JSON object. "
+        "No preamble, no markdown fences.\n\n"
+        "CRITICAL FORMATTING RULES — must be respected in the revised output:\n"
+        "1. No markdown in any string value. No **bold**, no *italic*, no [brackets].\n"
+        "2. contact: two lines separated by \\n — line 1: city · phone · email, line 2: socials.\n"
+        "3. skills: flat list of plain strings, one per category, format 'Category: item1, item2'.\n"
+        "4. EXPERIENCE bullets follow this exact pattern per employer:\n"
+        "   - 'Company · Location | Role Title | Start – End'\n"
+        "   - 'Project Name — description'\n"
+        "   - responsibility bullets (plain sentences)\n"
+        "   - 'Stack: Tech1, Tech2'\n"
+        "5. EDUCATION bullets: 'Institution · Degree Year'\n"
+        "6. Do not add any extra sections. Do not put skills inside sections."
     )
 
     console.print("[dim]⏳ Applying feedback with LLM...[/dim]")

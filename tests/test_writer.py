@@ -179,6 +179,8 @@ def test_write_resume_makes_one_llm_call_returns_content(writer_state, mock_llm_
         with patch("pipeline.agents.writer.settings") as mock_settings:
             mock_settings.output_dir = str(tmp_path)
             mock_settings.max_revision_rounds = 3
+            mock_settings.llm_provider = "anthropic"
+            mock_settings.anthropic_api_key = "test-key"
             result = write_resume(writer_state)
 
     mock_client.messages.create.assert_called_once()
@@ -199,9 +201,36 @@ def test_apply_feedback_increments_revision_round(writer_state, mock_llm_message
         with patch("pipeline.agents.writer.settings") as mock_settings:
             mock_settings.output_dir = str(tmp_path)
             mock_settings.max_revision_rounds = 3
+            mock_settings.llm_provider = "anthropic"
+            mock_settings.anthropic_api_key = "test-key"
             result = apply_feedback(writer_state)
 
     assert result["revision_round"] == 1
+
+
+def test_apply_feedback_revision_prompt_includes_formatting_rules(writer_state, mock_llm_message, tmp_path):
+    """Revision prompt must include structural formatting rules so the LLM doesn't revert to markdown."""
+    from pipeline.agents.writer import apply_feedback
+
+    writer_state["revision_round"] = 0
+    writer_state["human_feedback"] = "Make the summary shorter."
+
+    with patch("pipeline.agents.writer.anthropic.Anthropic") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = mock_llm_message
+        with patch("pipeline.agents.writer.settings") as mock_settings:
+            mock_settings.output_dir = str(tmp_path)
+            mock_settings.max_revision_rounds = 3
+            mock_settings.llm_provider = "anthropic"
+            mock_settings.anthropic_api_key = "test-key"
+            apply_feedback(writer_state)
+
+    call_args = mock_client.messages.create.call_args
+    prompt = call_args[1]["messages"][0]["content"]
+    assert "No markdown" in prompt
+    assert "Company · Location | Role Title" in prompt
+    assert "Stack:" in prompt
 
 
 def test_should_revise_routes_correctly():
@@ -239,6 +268,7 @@ def test_write_resume_passes_api_key_to_anthropic(writer_state, mock_llm_message
             mock_settings.output_dir = str(tmp_path)
             mock_settings.max_revision_rounds = 3
             mock_settings.anthropic_api_key = "sk-ant-test-key"
+            mock_settings.llm_provider = "anthropic"
             write_resume(writer_state)
 
     mock_cls.assert_called_once_with(api_key="sk-ant-test-key")
