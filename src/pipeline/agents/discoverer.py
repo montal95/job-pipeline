@@ -721,12 +721,181 @@ async def scrape_builtin(state: PipelineState) -> dict:
     return {"raw_results": results}
 
 
+
+# ── Wellfound scraper (Playwright, no auth) ───────────────────────────────────
+
+
+def _transform_wellfound_jobs(jobs_data: list[dict]) -> list[RawJobListing]:
+    """
+    Transform raw JS-extracted Wellfound job data into RawJobListing objects.
+    Pure function — no browser dependency, fully unit testable.
+
+    Each dict has the shape returned by the Playwright page.evaluate():
+      { company, title, employment_type, salary, location, url }
+    Salary format: "$150k – $170k" or "" if not listed.
+    Location format: "Remote only • United States" or "Onsite or remote • NYC+2"
+    """
+    results: list[RawJobListing] = []
+    for job in jobs_data:
+        company = job.get("company", "") or "Unknown"
+        title = job.get("title", "")
+        if not title:
+            continue
+        salary_str = job.get("salary", "") or ""
+        location_raw = job.get("location", "") or ""
+        url = job.get("url", "") or ""
+        # Parse location and workplace from "Remote only • United States" pattern
+        if "•" in location_raw:
+            parts = [p.strip() for p in location_raw.split("•")]
+            workplace_hint = parts[0].lower()
+            location = parts[1] if len(parts) > 1 else ""
+        else:
+            workplace_hint = location_raw.lower()
+            location = ""
+        # Normalize vague country entries
+        vague = {"united states", "usa", "us", ""}
+        if location.lower() in vague:
+            location = ""
+        # Normalize salary: "$150k – $170k" → parseable by _parse_compensation
+        salary_str = salary_str.replace("k", "K").replace(" – ", "-").replace("–", "-")
+        comp_low, comp_high = _parse_compensation(salary_str)
+        workplace = (
+            WorkplaceType.HYBRID if "hybrid" in workplace_hint or "onsite or remote" in workplace_hint else
+            WorkplaceType.REMOTE if "remote" in workplace_hint else
+            WorkplaceType.ONSITE if "onsite" in workplace_hint else None
+        )
+        results.append(RawJobListing(
+            source="wellfound",
+            title=title,
+            company=company,
+            location=location,
+            source_url=url,
+            compensation_low=comp_low,
+            compensation_high=comp_high,
+            workplace_type=workplace,
+        ))
+    return results
+
+
+async def scrape_wellfound(state: PipelineState) -> dict:
+    """
+    PARKED — IP-based bot detection blocks Playwright (March 2026).
+    grep: WELLFOUND_PARKED
+
+    Wellfound returns "Access is temporarily restricted" citing automated
+    activity from the IP. Block is network-level, not session/cookie level —
+    persistent browser profiles do not help.
+
+    Card structure was fully confirmed via Chrome DevTools inspection and is
+    preserved in the commented implementation below. The _transform_wellfound_jobs()
+    function and tests are also preserved so the plumbing is ready when a
+    workaround is found.
+
+    Potential workarounds to research:
+      1. Residential proxy rotation
+      2. playwright-extra + puppeteer-extra-plugin-stealth
+      3. Official Wellfound API (requires partnership application)
+    """
+    console.print("[dim]Wellfound: parked (IP-based bot detection) — skipping[/dim]")
+    return {"raw_results": []}
+
+
+# # ── scrape_wellfound full implementation (WELLFOUND_PARKED) ──────────────────
+# # Uncomment and re-wire into SOURCE_NODE_MAP + build_discoverer_graph when
+# # a workaround for Wellfound's IP-based bot detection is found.
+# #
+# # Confirmed card structure (Chrome DevTools, March 2026):
+# #   Company cards: .mb-6.w-full.rounded.border.border-gray-400.bg-white
+# #   Job listings within card: .min-h-[50px] divs (one per role)
+# #   Lines: [title, employment_type, salary?, location?, exp?, date, Save, Apply]
+# #   Location: "Remote only • United States" or "Onsite or remote • City+N"
+# #   Apply link: a[href*="/jobs/"] → full URL e.g. wellfound.com/jobs/3938437-slug
+# #   Salary: "$150k – $170k" (starts with $, dash-separated)
+# #
+# async def _scrape_wellfound_impl(state: PipelineState) -> dict:
+#     if async_playwright is None:
+#         return {"raw_results": []}
+#     params = state["search_params"]
+#     search_url = (
+#         f"https://wellfound.com/role/r/software-engineer"
+#         f"?keywords={quote_plus(params.query)}"
+#     )
+#     results: list[RawJobListing] = []
+#     jobs_data: list[dict] = []
+#     try:
+#         import asyncio as _asyncio
+#         from pathlib import Path as _Path
+#         user_data_dir = str(
+#             _Path(__file__).parent.parent.parent / "playwright" / ".profiles" / "wellfound"
+#         )
+#         _Path(user_data_dir).mkdir(parents=True, exist_ok=True)
+#         async with async_playwright() as p:
+#             context = await p.chromium.launch_persistent_context(
+#                 user_data_dir, headless=False, channel="chrome",
+#             )
+#             page = context.pages[0] if context.pages else await context.new_page()
+#             await page.goto(search_url, wait_until="networkidle")
+#             await _asyncio.sleep(6)
+#             await page.wait_for_function("() => document.body !== null", timeout=10000)
+#             try:
+#                 await page.wait_for_selector(
+#                     ".mb-6.w-full.rounded.border.border-gray-400.bg-white",
+#                     timeout=15000,
+#                 )
+#             except Exception:
+#                 page_text = await page.evaluate(
+#                     "() => document.body?.innerText?.slice(0, 400) || 'no body'"
+#                 )
+#                 console.print(
+#                     f"[yellow]⚠ Wellfound: cards not found. Page: {page_text}[/yellow]"
+#                 )
+#                 await context.close()
+#                 return {"raw_results": []}
+#             jobs_data = await page.evaluate("""() => {
+#                 const cards = document.querySelectorAll(
+#                     '.mb-6.w-full.rounded.border.border-gray-400.bg-white'
+#                 );
+#                 const out = [];
+#                 cards.forEach(card => {
+#                     const company = card.innerText.split('\\n')[0].trim();
+#                     card.querySelectorAll('.min-h-\\\\[50px\\\\]').forEach(jd => {
+#                         const lines = jd.innerText.split('\\n').map(s => s.trim()).filter(Boolean);
+#                         const link = jd.querySelector('a[href*="/jobs/"]');
+#                         out.push({
+#                             company,
+#                             title: lines[0] || '',
+#                             salary: lines.find(l => l.startsWith('$')) || '',
+#                             location: lines.find(l => l.includes('•')) || '',
+#                             url: link ? link.href : '',
+#                         });
+#                     });
+#                 });
+#                 return out;
+#             }""")
+#             await context.close()
+#         results = _transform_wellfound_jobs(jobs_data[:params.max_results_per_source])
+#     except Exception as exc:
+#         console.print(f"[yellow]⚠ Wellfound scrape error: {exc}[/yellow]")
+#     console.print(f"[dim]Wellfound: {len(results)} listings[/dim]")
+#     return {"raw_results": results}
+
+
 SOURCE_NODE_MAP = {
     "indeed": "scrape_indeed",
     "dice": "scrape_dice",
     "linkedin": "scrape_linkedin",
     "ziprecruiter": "scrape_ziprecruiter",
     "builtin": "scrape_builtin",
+    # "wellfound": "scrape_wellfound",  # PARKED — IP-based bot detection blocks Playwright
+    #   Wellfound returns "Access is temporarily restricted" citing automated activity
+    #   from the IP. This is network-level, not session/cookie level — persistent
+    #   browser profiles don't help. Potential workarounds to research:
+    #   1. Residential proxy rotation
+    #   2. Playwright stealth plugin (playwright-extra + puppeteer-extra-plugin-stealth)
+    #   3. Official Wellfound API (requires partnership application)
+    #   The _transform_wellfound_jobs() function and tests are preserved below
+    #   so the plumbing is ready when a workaround is found.
+    #   grep: WELLFOUND_PARKED to find all related code
 }
 
 
@@ -893,6 +1062,7 @@ def build_discoverer_graph() -> StateGraph:
     graph.add_node("scrape_linkedin", scrape_linkedin)
     graph.add_node("scrape_ziprecruiter", scrape_ziprecruiter)
     graph.add_node("scrape_builtin", scrape_builtin)
+    # graph.add_node("scrape_wellfound", scrape_wellfound)  # WELLFOUND_PARKED
     graph.add_node("merge_results", merge_results)
     graph.add_node("triage_interrupt", triage_interrupt)
     graph.add_node("persist_to_db", persist_to_db)
@@ -900,6 +1070,7 @@ def build_discoverer_graph() -> StateGraph:
     graph.set_entry_point("parse_search_params")
     graph.add_conditional_edges("parse_search_params", fan_out_sources)
     for scraper in ("scrape_indeed", "scrape_dice", "scrape_linkedin", "scrape_ziprecruiter", "scrape_builtin"):
+        # "scrape_wellfound" omitted — WELLFOUND_PARKED
         graph.add_edge(scraper, "merge_results")
     graph.add_edge("merge_results", "triage_interrupt")
     graph.add_edge("triage_interrupt", "persist_to_db")

@@ -664,6 +664,120 @@ def test_transform_builtin_jobs_vague_location_normalized():
     assert pp.location == "Chicago, IL, USA"
 
 
+# ── Wellfound scraper ──────────────────────────────────────────────────────────
+#
+# Card structure confirmed via Chrome DevTools inspection (March 2026):
+#   Company cards: .mb-6.w-full.rounded.border.border-gray-400.bg-white
+#   Job divs within card: .min-h-[50px] (one per role)
+#   Lines: [title, employment_type, salary?, location?, exp?, date, Save, Apply]
+#   Location format: "Remote only • United States" or "Onsite or remote • NYC+1"
+#   Salary format: "$150k – $170k"
+
+WF_FIXTURE = [
+    {
+        "company": "Remesh",
+        "title": "Software Engineer",
+        "salary": "$150k – $170k",
+        "location": "",
+        "url": "https://wellfound.com/jobs/3938437-software-engineer",
+    },
+    {
+        "company": "Sydecar",
+        "title": "Staff Software Engineer",
+        "salary": "$225k – $255k",
+        "location": "Remote • New York City+1",
+        "url": "https://wellfound.com/jobs/3756999-staff-software-engineer",
+    },
+    {
+        "company": "Acme",
+        "title": "Backend Engineer",
+        "salary": "$120k – $160k",
+        "location": "Onsite or remote • Chicago, IL",
+        "url": "https://wellfound.com/jobs/1111111-backend-engineer",
+    },
+    {
+        "company": "BadCo",
+        "title": "",
+        "salary": "",
+        "location": "",
+        "url": "",
+    },
+]
+
+
+def test_transform_wellfound_jobs_happy_path():
+    from pipeline.agents.discoverer import _transform_wellfound_jobs
+    results = _transform_wellfound_jobs(WF_FIXTURE)
+    assert len(results) == 3  # BadCo skipped
+    assert results[0].title == "Software Engineer"
+    assert results[0].company == "Remesh"
+    assert results[0].source == "wellfound"
+
+
+def test_transform_wellfound_jobs_salary_extracted():
+    from pipeline.agents.discoverer import _transform_wellfound_jobs
+    results = _transform_wellfound_jobs(WF_FIXTURE)
+    assert results[0].compensation_low == 150000
+    assert results[0].compensation_high == 170000
+
+
+def test_transform_wellfound_jobs_remote_detected():
+    from pipeline.agents.discoverer import _transform_wellfound_jobs
+    from pipeline.state import WorkplaceType
+    results = _transform_wellfound_jobs(WF_FIXTURE)
+    assert results[1].workplace_type == WorkplaceType.REMOTE
+
+
+def test_transform_wellfound_jobs_hybrid_detected():
+    from pipeline.agents.discoverer import _transform_wellfound_jobs
+    from pipeline.state import WorkplaceType
+    results = _transform_wellfound_jobs(WF_FIXTURE)
+    assert results[2].workplace_type == WorkplaceType.HYBRID
+
+
+def test_transform_wellfound_jobs_location_after_bullet():
+    from pipeline.agents.discoverer import _transform_wellfound_jobs
+    results = _transform_wellfound_jobs(WF_FIXTURE)
+    # "Remote • New York City+1" → location = "New York City+1"
+    assert results[1].location == "New York City+1"
+    # "Onsite or remote • Chicago, IL" → location = "Chicago, IL"
+    assert results[2].location == "Chicago, IL"
+
+
+def test_transform_wellfound_jobs_vague_location_blank():
+    from pipeline.agents.discoverer import _transform_wellfound_jobs
+    results = _transform_wellfound_jobs(WF_FIXTURE)
+    # Remesh has no location → blank
+    assert results[0].location == ""
+
+
+def test_transform_wellfound_jobs_url_preserved():
+    from pipeline.agents.discoverer import _transform_wellfound_jobs
+    results = _transform_wellfound_jobs(WF_FIXTURE)
+    assert results[0].source_url == "https://wellfound.com/jobs/3938437-software-engineer"
+
+
+def test_transform_wellfound_jobs_skips_empty_title():
+    from pipeline.agents.discoverer import _transform_wellfound_jobs
+    results = _transform_wellfound_jobs(WF_FIXTURE)
+    assert "BadCo" not in [r.company for r in results]
+
+
+def test_transform_wellfound_jobs_empty_input():
+    from pipeline.agents.discoverer import _transform_wellfound_jobs
+    assert _transform_wellfound_jobs([]) == []
+
+
+@pytest.mark.asyncio
+async def test_scrape_wellfound_no_playwright_returns_empty(monkeypatch):
+    """scrape_wellfound returns empty gracefully when Playwright is unavailable."""
+    import pipeline.agents.discoverer as disc
+    monkeypatch.setattr(disc, "async_playwright", None)
+    state = empty_state()
+    state["search_params"] = SearchParams(query="engineer", location="Chicago, IL")
+    assert await disc.scrape_wellfound(state) == {"raw_results": []}
+
+
 def test_transform_builtin_jobs_skips_empty_title():
     from pipeline.agents.discoverer import _transform_builtin_jobs
     results = _transform_builtin_jobs(BUILTIN_FIXTURE)

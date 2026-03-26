@@ -52,3 +52,5 @@ Thumbs.db
 *.swp
 
 scripts/list_queued.py
+
+playwright/.profiles/
