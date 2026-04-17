@@ -1,0 +1,38 @@
+# Target company watchlist — copy to config/companies.yml to activate.
+#
+# The scanner hits the public JSON API for each enabled entry (Greenhouse,
+# Ashby, or Lever) and merges listings into the normal discovery pipeline.
+# No auth, no Playwright, no API tokens — just URLs you could paste into a
+# browser. Flip `enabled: false` to temporarily mute a company without losing
+# the entry.
+#
+# Schema:
+#   companies:
+#     - name: Human-readable name (used for logging and `company` on listings)
+#       url:  Public careers page URL (greenhouse.io, ashbyhq.com, or lever.co)
+#       enabled: true | false
+companies:
+  - name: Spring Health
+    url: https://jobs.ashbyhq.com/spring-health
+    enabled: true
+  - name: Headway
+    url: https://jobs.ashbyhq.com/headway
+    enabled: true
+  - name: Grow Therapy
+    url: https://jobs.lever.co/growtherapy
+    enabled: true
+  - name: Lyra Health
+    url: https://boards.greenhouse.io/lyrahealth
+    enabled: true
+  - name: Cerebral
+    url: https://boards.greenhouse.io/cerebral
+    enabled: true
+  - name: Alma
+    url: https://jobs.ashbyhq.com/helloalma
+    enabled: true
+  - name: Talkiatry
+    url: https://boards.greenhouse.io/talkiatry
+    enabled: true
+  - name: Chime
+    url: https://boards.greenhouse.io/chime
+    enabled: true

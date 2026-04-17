@@ -58,3 +58,7 @@ Thumbs.db
 scripts/list_queued.py
 
 playwright/.profiles/
+
+# ── Private company watchlist ──────────────────────────────────────────────────
+# config/companies.example.yml is tracked; the real watchlist is personal.
+config/companies.yml
