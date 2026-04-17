@@ -797,3 +797,175 @@ async def test_scrape_builtin_no_playwright_returns_empty(monkeypatch):
     state = empty_state()
     state["search_params"] = SearchParams(query="engineer", location="Chicago, IL")
     assert await disc.scrape_builtin(state) == {"raw_results": []}
+
+
+# ── F1: --dry-run flag ────────────────────────────────────────────────────────
+
+import sqlite3
+
+
+def _apply_all_migrations(db_path: str) -> None:
+    """Apply every migrations/*.sql file to a fresh SQLite DB (test helper)."""
+    conn = sqlite3.connect(db_path)
+    migrations_dir = Path(__file__).parent.parent / "migrations"
+    for migration_file in sorted(migrations_dir.glob("*.sql")):
+        try:
+            conn.executescript(migration_file.read_text())
+        except sqlite3.OperationalError:
+            pass
+    conn.commit()
+    conn.close()
+
+
+def _make_shortlist(n: int) -> list:
+    from pipeline.state import JobListing
+    return [
+        JobListing(
+            source="indeed",
+            title=f"Role {i}",
+            company=f"Company {i}",
+            location="Chicago, IL",
+            source_url=f"https://example.com/job/{i}",
+            fingerprint=f"fp_dryrun_{i:02d}",
+        )
+        for i in range(n)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dry_run_flag_skips_db_write(tmp_path, monkeypatch):
+    """dry_run=True: persist_to_db writes zero rows to the jobs table."""
+    from pipeline import database as db_module
+    from pipeline.agents import discoverer as disc
+
+    db_path = str(tmp_path / "dryrun.db")
+    _apply_all_migrations(db_path)
+    monkeypatch.setattr(db_module.settings, "app_db_path", db_path)
+
+    state = empty_state()
+    state["search_params"] = SearchParams(query="x", location="y")
+    state["shortlist"] = _make_shortlist(2)
+    state["dry_run"] = True  # type: ignore[typeddict-unknown-key]
+
+    await disc.persist_to_db(state)
+
+    conn = sqlite3.connect(db_path)
+    count = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+    conn.close()
+    assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_dry_run_false_writes_db(tmp_path, monkeypatch):
+    """dry_run=False: persist_to_db writes every approved listing."""
+    from pipeline import database as db_module
+    from pipeline.agents import discoverer as disc
+
+    db_path = str(tmp_path / "dryrun_off.db")
+    _apply_all_migrations(db_path)
+    monkeypatch.setattr(db_module.settings, "app_db_path", db_path)
+
+    state = empty_state()
+    state["search_params"] = SearchParams(query="x", location="y")
+    state["shortlist"] = _make_shortlist(2)
+    state["dry_run"] = False  # type: ignore[typeddict-unknown-key]
+
+    await disc.persist_to_db(state)
+
+    conn = sqlite3.connect(db_path)
+    count = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+    conn.close()
+    assert count == 2
+
+
+def test_dry_run_defaults_to_false():
+    """empty_state() initializes dry_run to False."""
+    state = empty_state()
+    assert state["dry_run"] is False  # type: ignore[typeddict-unknown-key]
+
+
+@pytest.mark.asyncio
+async def test_dry_run_prints_summary(tmp_path, monkeypatch, capsys):
+    """dry_run=True prints a summary line with the count and company::title pairs."""
+    from pipeline import database as db_module
+    from pipeline.agents import discoverer as disc
+
+    db_path = str(tmp_path / "dryrun_summary.db")
+    _apply_all_migrations(db_path)
+    monkeypatch.setattr(db_module.settings, "app_db_path", db_path)
+
+    state = empty_state()
+    state["search_params"] = SearchParams(query="x", location="y")
+    shortlist = _make_shortlist(3)
+    state["shortlist"] = shortlist
+    state["dry_run"] = True  # type: ignore[typeddict-unknown-key]
+
+    await disc.persist_to_db(state)
+
+    captured = capsys.readouterr().out
+    assert "3" in captured
+    assert any(f"{j.company}::{j.title}" in captured for j in shortlist)
+
+
+def test_cli_dry_run_sets_state_true(monkeypatch):
+    """CLI --dry-run/--no-dry-run propagate into the initial PipelineState."""
+    from typer.testing import CliRunner
+
+    from pipeline import cli as cli_module
+
+    captured_states: list[dict] = []
+
+    class FakeSnap:
+        values: dict = {"shortlist": []}
+
+    class FakeGraph:
+        async def ainvoke(self, initial, config=None):
+            captured_states.append(dict(initial))
+            from langgraph.errors import GraphInterrupt
+
+            raise GraphInterrupt()
+
+        async def aget_state(self, config):
+            return FakeSnap()
+
+    class FakeCompiledFactory:
+        def compile(self, **kwargs):
+            return FakeGraph()
+
+    def fake_build_graph():
+        return FakeCompiledFactory()
+
+    class FakeCheckpointer:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return None
+
+    class FakeSaver:
+        @classmethod
+        def from_conn_string(cls, path):
+            return FakeCheckpointer()
+
+    import pipeline.agents.discoverer as disc_module
+    monkeypatch.setattr(disc_module, "build_discoverer_graph", fake_build_graph)
+    monkeypatch.setattr(
+        "langgraph.checkpoint.sqlite.aio.AsyncSqliteSaver", FakeSaver
+    )
+
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli_module.app, ["discover", "--dry-run", "--sources", "indeed"]
+    )
+    assert result.exit_code == 0, result.output
+    assert captured_states, "graph.ainvoke was never called"
+    assert captured_states[-1].get("dry_run") is True
+
+    captured_states.clear()
+    result = runner.invoke(
+        cli_module.app, ["discover", "--no-dry-run", "--sources", "indeed"]
+    )
+    assert result.exit_code == 0, result.output
+    assert captured_states, "graph.ainvoke was never called"
+    assert captured_states[-1].get("dry_run") is False
