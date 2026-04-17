@@ -279,7 +279,11 @@ def discover(
     query: str = typer.Option("software engineer", "--query", "-q", help="Job title or keyword"),
     location: str = typer.Option("Chicago, IL", "--location", "-l", help="Location filter"),
     remote: bool = typer.Option(True, "--remote/--no-remote", help="Include remote roles"),
-    sources: str = typer.Option("indeed,dice", "--sources", "-s", help="Comma-separated sources"),
+    sources: str = typer.Option(
+        "dice,linkedin,ziprecruiter,builtin,target_companies",
+        "--sources", "-s",
+        help="Comma-separated sources",
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run/--no-dry-run",

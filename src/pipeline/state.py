@@ -70,7 +70,13 @@ class SearchParams(BaseModel):
     query: str
     location: str
     sources: list[str] = Field(
-        default_factory=lambda: ["indeed", "dice", "linkedin", "ziprecruiter"]
+        default_factory=lambda: [
+            "dice",
+            "linkedin",
+            "ziprecruiter",
+            "builtin",
+            "target_companies",
+        ]
     )
     remote: bool = True
     max_results_per_source: int = 25
