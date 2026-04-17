@@ -41,6 +41,7 @@ from rich.console import Console
 from rich.table import Table
 from rich import box
 
+from pipeline.agents.company_scanner import scrape_target_companies
 from pipeline.ats import ATS_PATTERNS, detect_ats
 from pipeline.config import settings
 from pipeline.database import get_connection
@@ -943,6 +944,7 @@ SOURCE_NODE_MAP = {
     "linkedin": "scrape_linkedin",
     "ziprecruiter": "scrape_ziprecruiter",
     "builtin": "scrape_builtin",
+    "target_companies": "scrape_target_companies",
     # "wellfound": "scrape_wellfound",  # PARKED — IP-based bot detection blocks Playwright
     #   Wellfound returns "Access is temporarily restricted" citing automated activity
     #   from the IP. This is network-level, not session/cookie level — persistent
@@ -1153,6 +1155,7 @@ def build_discoverer_graph() -> StateGraph:
     graph.add_node("scrape_linkedin", scrape_linkedin)
     graph.add_node("scrape_ziprecruiter", scrape_ziprecruiter)
     graph.add_node("scrape_builtin", scrape_builtin)
+    graph.add_node("scrape_target_companies", scrape_target_companies)
     # graph.add_node("scrape_wellfound", scrape_wellfound)  # WELLFOUND_PARKED
     graph.add_node("merge_results", merge_results)
     graph.add_node("triage_interrupt", triage_interrupt)
@@ -1160,7 +1163,14 @@ def build_discoverer_graph() -> StateGraph:
 
     graph.set_entry_point("parse_search_params")
     graph.add_conditional_edges("parse_search_params", fan_out_sources)
-    for scraper in ("scrape_indeed", "scrape_dice", "scrape_linkedin", "scrape_ziprecruiter", "scrape_builtin"):
+    for scraper in (
+        "scrape_indeed",
+        "scrape_dice",
+        "scrape_linkedin",
+        "scrape_ziprecruiter",
+        "scrape_builtin",
+        "scrape_target_companies",
+    ):
         # "scrape_wellfound" omitted — WELLFOUND_PARKED
         graph.add_edge(scraper, "merge_results")
     graph.add_edge("merge_results", "triage_interrupt")

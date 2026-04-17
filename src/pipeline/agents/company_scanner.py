@@ -25,8 +25,11 @@ import httpx
 import yaml
 from rich.console import Console
 
-from pipeline.agents.discoverer import HEADERS, _parse_compensation
 from pipeline.state import RawJobListing
+
+# `discoverer` imports are deferred — discoverer imports this module as well
+# (scrape_target_companies is registered in its SOURCE_NODE_MAP), so importing
+# it at module scope here would form a cycle at load time.
 
 console = Console()
 
@@ -128,6 +131,8 @@ def _parse_ashby_jobs(payload: dict, company: str) -> list[RawJobListing]:
 def _parse_lever_jobs(
     payload: list[dict], company: str
 ) -> list[RawJobListing]:
+    from pipeline.agents.discoverer import _parse_compensation
+
     results: list[RawJobListing] = []
     for job in payload:
         title = job.get("text")
@@ -219,6 +224,8 @@ async def scrape_target_companies(state: dict) -> dict:
 
     if not resolved:
         return {"raw_results": []}
+
+    from pipeline.agents.discoverer import HEADERS
 
     results: list[RawJobListing] = []
     async with httpx.AsyncClient(headers=HEADERS, timeout=15) as client:
