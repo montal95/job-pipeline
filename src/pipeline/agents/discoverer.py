@@ -29,6 +29,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 from urllib.parse import quote_plus
 from uuid import uuid4
 
@@ -145,6 +146,31 @@ def _extract_salary_from_description(description: str) -> tuple[int | None, int 
             if low:
                 return low, high
     return None, None
+
+
+def _build_title_filter(
+    positive: list[str], negative: list[str]
+) -> Callable[[str], bool]:
+    """
+    Build a predicate that returns True if a title should pass the filter.
+
+    - Negative keywords take priority: any match → rejected.
+    - Empty positive list → all non-negative titles pass.
+    - Non-empty positive list → at least one positive keyword must match.
+    Matching is case-insensitive substring.
+    """
+    neg = [kw.lower() for kw in negative if kw.strip()]
+    pos = [kw.lower() for kw in positive if kw.strip()]
+
+    def allow(title: str) -> bool:
+        lowered = title.lower()
+        if any(kw in lowered for kw in neg):
+            return False
+        if not pos:
+            return True
+        return any(kw in lowered for kw in pos)
+
+    return allow
 
 
 def _get_auth_path(platform: str) -> Path:
