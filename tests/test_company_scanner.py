@@ -315,3 +315,28 @@ companies:
     companies = {r.company for r in result["raw_results"]}
     assert "GH Co" in companies
     assert "Ashby Co" in companies
+
+
+# ── Fan-out integration ────────────────────────────────────────────────────────
+
+
+def test_fan_out_includes_target_companies_when_in_sources():
+    """When `target_companies` is in SearchParams.sources, fan_out_sources emits
+    a Send for the scrape_target_companies node alongside the marketplace
+    scrapers — confirming the routing key is wired end-to-end."""
+    from pipeline.agents.discoverer import SOURCE_NODE_MAP, fan_out_sources
+    from pipeline.state import SearchParams, empty_state
+
+    assert SOURCE_NODE_MAP["target_companies"] == "scrape_target_companies"
+
+    state = empty_state()
+    state["search_params"] = SearchParams(
+        query="engineer",
+        location="Chicago, IL",
+        sources=["dice", "target_companies"],
+    )
+
+    sends = fan_out_sources(state)
+    node_names = {s.node for s in sends}
+    assert "scrape_target_companies" in node_names
+    assert "scrape_dice" in node_names
