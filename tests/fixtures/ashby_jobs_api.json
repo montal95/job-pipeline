@@ -1,0 +1,20 @@
+{
+  "jobs": [
+    {
+      "id": "11111111-aaaa-bbbb-cccc-222222222222",
+      "title": "Backend Software Engineer",
+      "jobUrl": "https://jobs.ashbyhq.com/acme/11111111-aaaa-bbbb-cccc-222222222222",
+      "location": "Remote, United States",
+      "employmentType": "FullTime",
+      "department": "Engineering"
+    },
+    {
+      "id": "33333333-dddd-eeee-ffff-444444444444",
+      "title": "Senior Full Stack Engineer",
+      "jobUrl": "https://jobs.ashbyhq.com/acme/33333333-dddd-eeee-ffff-444444444444",
+      "location": "New York, NY",
+      "employmentType": "FullTime",
+      "department": "Engineering"
+    }
+  ]
+}
