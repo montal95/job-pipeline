@@ -1098,6 +1098,92 @@ async def test_merge_tags_docs_ready_company_role_with_previously_seen_note(monk
     assert result["shortlist"][0].notes == "[previously seen — status: docs_ready]"
 
 
+# ── F3: title filter pure function ────────────────────────────────────────────
+
+
+def test_title_filter_positive_match():
+    from pipeline.agents.discoverer import _build_title_filter
+    allow = _build_title_filter(["engineer", "developer"], [])
+    assert allow("Senior Software Engineer") is True
+    assert allow("Backend Developer") is True
+    assert allow("Product Manager") is False
+
+
+def test_title_filter_negative_exclusion():
+    from pipeline.agents.discoverer import _build_title_filter
+    allow = _build_title_filter([], ["manager", "director"])
+    assert allow("Engineering Manager") is False
+    assert allow("Director of Engineering") is False
+    assert allow("Senior Engineer") is True
+
+
+def test_title_filter_empty_positive_allows_all():
+    from pipeline.agents.discoverer import _build_title_filter
+    allow = _build_title_filter([], ["intern"])
+    assert allow("Data Scientist") is True
+    assert allow("Platform Engineer") is True
+    assert allow("Software Engineering Intern") is False
+
+
+def test_title_filter_case_insensitive():
+    from pipeline.agents.discoverer import _build_title_filter
+    allow = _build_title_filter(["engineer"], ["MANAGER"])
+    assert allow("SENIOR ENGINEER") is True
+    assert allow("engineering MANAGER") is False
+    assert allow("Engineering Manager") is False
+
+
+def test_title_filter_negative_takes_priority():
+    from pipeline.agents.discoverer import _build_title_filter
+    allow = _build_title_filter(["engineer"], ["staff"])
+    assert allow("Staff Engineer") is False
+
+
+def test_title_filter_both_empty_allows_all():
+    from pipeline.agents.discoverer import _build_title_filter
+    allow = _build_title_filter([], [])
+    assert allow("Any Title") is True
+    assert allow("") is True
+
+
+@pytest.mark.asyncio
+async def test_merge_results_filters_titles_before_dedup(monkeypatch):
+    """Filtered-out titles are dropped before fingerprint/DB lookup."""
+    import pipeline.agents.discoverer as disc
+    from pipeline import config as config_module
+
+    raw = [
+        RawJobListing(
+            source="dice",
+            title="Engineering Manager",
+            company="Acme",
+            location="Chicago, IL",
+            source_url="https://dice.com/j/1",
+        ),
+        RawJobListing(
+            source="dice",
+            title="Senior Engineer",
+            company="Acme",
+            location="Chicago, IL",
+            source_url="https://dice.com/j/2",
+        ),
+    ]
+    monkeypatch.setattr(
+        config_module.settings, "title_filter_positive", "", raising=False
+    )
+    monkeypatch.setattr(
+        config_module.settings, "title_filter_negative", "manager", raising=False
+    )
+    monkeypatch.setattr(disc, "get_connection", _mock_get_connection_with_rows([]))
+
+    state = empty_state()
+    state["raw_results"] = raw  # type: ignore[assignment]
+    result = await disc.merge_results(state)
+    titles = [j.title for j in result["shortlist"]]
+    assert "Engineering Manager" not in titles
+    assert "Senior Engineer" in titles
+
+
 def test_cli_dry_run_sets_state_true(monkeypatch):
     """CLI --dry-run/--no-dry-run propagate into the initial PipelineState."""
     from typer.testing import CliRunner
