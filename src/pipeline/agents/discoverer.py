@@ -42,6 +42,7 @@ from rich.table import Table
 from rich import box
 
 from pipeline.ats import ATS_PATTERNS, detect_ats
+from pipeline.config import settings
 from pipeline.database import get_connection
 from pipeline.state import (
     AtsType,
@@ -982,6 +983,18 @@ async def merge_results(state: PipelineState) -> dict:
     if not raw:
         console.print("[yellow]No raw results from any source.[/yellow]")
         return {"shortlist": [], "skipped": []}
+
+    title_allowed = _build_title_filter(
+        settings.title_filter_positive_list,
+        settings.title_filter_negative_list,
+    )
+    pre_count = len(raw)
+    raw = [r for r in raw if title_allowed(r.title)]
+    filtered_out = pre_count - len(raw)
+    if filtered_out:
+        console.print(
+            f"[dim]Title filter: dropped {filtered_out} of {pre_count} listings[/dim]"
+        )
 
     seen: dict[str, RawJobListing] = {}
     for listing in raw:

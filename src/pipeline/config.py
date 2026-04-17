@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     default_max_results_per_source: int = 25
     enabled_sources: str = "indeed,dice,linkedin,ziprecruiter"
 
+    # Title filter — applied in merge_results before fingerprint dedup.
+    # Negative keywords win over positive; empty positive list = allow all non-negative.
+    title_filter_positive: str = ""
+    title_filter_negative: str = (
+        "manager,director,principal,staff,vp,head of,intern,qa analyst"
+    )
+
     # Writer
     max_revision_rounds: int = 3
 
@@ -50,6 +57,14 @@ class Settings(BaseSettings):
     @property
     def sources_list(self) -> list[str]:
         return [s.strip() for s in self.enabled_sources.split(",")]
+
+    @property
+    def title_filter_positive_list(self) -> list[str]:
+        return [s.strip() for s in self.title_filter_positive.split(",") if s.strip()]
+
+    @property
+    def title_filter_negative_list(self) -> list[str]:
+        return [s.strip() for s in self.title_filter_negative.split(",") if s.strip()]
 
 
 settings = Settings()

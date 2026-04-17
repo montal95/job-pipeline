@@ -1013,10 +1013,10 @@ async def test_merge_does_not_suppress_different_title_same_company(monkeypatch)
     raw = [
         RawJobListing(
             source="dice",
-            title="Staff Engineer",
+            title="Backend Engineer",
             company="Acme Corp",
             location="Chicago, IL",
-            source_url="https://dice.com/j/staff",
+            source_url="https://dice.com/j/be",
         )
     ]
     rows = [
@@ -1033,7 +1033,7 @@ async def test_merge_does_not_suppress_different_title_same_company(monkeypatch)
     state["raw_results"] = raw  # type: ignore[assignment]
     result = await disc.merge_results(state)
     assert len(result["shortlist"]) == 1
-    assert result["shortlist"][0].title == "Staff Engineer"
+    assert result["shortlist"][0].title == "Backend Engineer"
 
 
 @pytest.mark.asyncio
