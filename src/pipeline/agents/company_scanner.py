@@ -15,12 +15,25 @@ Routing:
 
 from __future__ import annotations
 
+import asyncio
 import re
+from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from pipeline.agents.discoverer import _parse_compensation
+import httpx
+import yaml
+from rich.console import Console
+
+from pipeline.agents.discoverer import HEADERS, _parse_compensation
 from pipeline.state import RawJobListing
+
+console = Console()
+
+# Config path — overridable in tests via monkeypatch.
+COMPANIES_CONFIG_PATH: Path = (
+    Path(__file__).parent.parent.parent.parent / "config" / "companies.yml"
+)
 
 AtsMarker = Literal["greenhouse", "ashby", "lever"]
 
@@ -142,3 +155,98 @@ def _parse_lever_jobs(
             )
         )
     return results
+
+
+# ── Graph node ────────────────────────────────────────────────────────────────
+
+
+_PARSER_BY_MARKER = {
+    "greenhouse": _parse_greenhouse_jobs,
+    "ashby": _parse_ashby_jobs,
+    "lever": _parse_lever_jobs,
+}
+
+
+async def scrape_target_companies(state: dict) -> dict:
+    """
+    Scan watchlist companies listed in config/companies.yml.
+
+    Each enabled entry is mapped to its JSON API URL via detect_ats_api(),
+    fetched concurrently, and parsed into RawJobListings with a per-ATS
+    `source` field. Per-company failures are swallowed with a yellow warning
+    — one bad endpoint never kills the whole scan.
+    """
+    if not COMPANIES_CONFIG_PATH.exists():
+        console.print(
+            f"⚠ Company watchlist not found at {COMPANIES_CONFIG_PATH}. "
+            "Copy config/companies.example.yml → config/companies.yml to enable.",
+            markup=False,
+            style="yellow",
+        )
+        return {"raw_results": []}
+
+    try:
+        cfg = yaml.safe_load(COMPANIES_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        console.print(
+            f"⚠ Failed to parse {COMPANIES_CONFIG_PATH}: {exc}",
+            markup=False,
+            style="yellow",
+        )
+        return {"raw_results": []}
+
+    entries = [
+        e for e in (cfg.get("companies") or [])
+        if isinstance(e, dict) and e.get("enabled", True) and e.get("url")
+    ]
+    if not entries:
+        return {"raw_results": []}
+
+    # Resolve each entry to (name, api_url, marker). Skip entries we can't route.
+    resolved: list[tuple[str, str, str]] = []
+    for entry in entries:
+        name = entry.get("name", entry["url"])
+        mapping = detect_ats_api(entry["url"])
+        if mapping is None:
+            console.print(
+                f"⚠ Unknown ATS for {name} ({entry['url']}) — skipping",
+                markup=False,
+                style="yellow",
+            )
+            continue
+        api_url, marker = mapping
+        resolved.append((name, api_url, marker))
+
+    if not resolved:
+        return {"raw_results": []}
+
+    results: list[RawJobListing] = []
+    async with httpx.AsyncClient(headers=HEADERS, timeout=15) as client:
+        fetches = [client.get(api_url) for (_, api_url, _) in resolved]
+        responses = await asyncio.gather(*fetches, return_exceptions=True)
+
+    for (name, api_url, marker), resp in zip(resolved, responses):
+        if isinstance(resp, Exception):
+            console.print(
+                f"⚠ {name}: fetch failed ({resp.__class__.__name__}) — skipping",
+                markup=False,
+                style="yellow",
+            )
+            continue
+        try:
+            payload = resp.json()
+            parser = _PARSER_BY_MARKER[marker]
+            parsed = parser(payload, company=name)
+        except Exception as exc:
+            console.print(
+                f"⚠ {name}: parse failed ({exc}) — skipping",
+                markup=False,
+                style="yellow",
+            )
+            continue
+        results.extend(parsed)
+        console.print(
+            f"[dim]{name} ({marker}): {len(parsed)} listings[/dim]"
+        )
+
+    return {"raw_results": results}
