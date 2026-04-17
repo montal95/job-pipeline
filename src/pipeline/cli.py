@@ -744,6 +744,68 @@ async def _run_pipeline(query: str, location: str, remote: bool):
     await _track()
 
 
+# ── Liveness check ─────────────────────────────────────────────────────────────
+
+
+@app.command("check-liveness")
+def check_liveness_cmd(
+    job_id: str = typer.Argument(..., help="Job ID from the database"),
+):
+    """Check whether a job posting is still accepting applications."""
+    run(_check_liveness(job_id))
+
+
+async def _check_liveness(job_id: str):
+    from pipeline.agents.liveness import check_job_liveness
+    from pipeline.database import get_connection
+    from pipeline.state import JobStatus
+
+    async with get_connection() as conn:
+        cursor = await conn.execute(
+            "SELECT id, title, company, source_url, status FROM jobs WHERE id = ?",
+            (job_id,),
+        )
+        row = await cursor.fetchone()
+
+    if row is None:
+        console.print(f"No job found with id {job_id}", markup=False)
+        raise typer.Exit(code=1)
+
+    url = row["source_url"]
+    console.print(
+        f"Checking liveness: {row['title']} @ {row['company']}", markup=False
+    )
+    console.print(f"  URL: {url}", markup=False)
+
+    result, reason = await check_job_liveness(url)
+    console.print(f"Result: {result} ({reason})", markup=False)
+
+    if result == "expired":
+        update = typer.confirm(
+            "Update status to possibly_inactive?", default=False
+        )
+        if update:
+            async with get_connection() as conn:
+                await conn.execute(
+                    "UPDATE jobs SET status = ? WHERE id = ?",
+                    (JobStatus.POSSIBLY_INACTIVE.value, job_id),
+                )
+                await conn.commit()
+            console.print(
+                f"Status updated to {JobStatus.POSSIBLY_INACTIVE.value}.",
+                markup=False,
+            )
+        else:
+            console.print("Status unchanged.", markup=False)
+    elif result == "uncertain":
+        console.print(
+            "Result uncertain — no status change suggested; verify manually.",
+            markup=False,
+        )
+    else:
+        console.print("Job appears active — no action needed.", markup=False)
+
+
 # ── DB management ──────────────────────────────────────────────────────────────
 
 
