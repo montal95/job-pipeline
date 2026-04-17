@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from pipeline.state import AtsType, JobStatus, SearchParams, WorkplaceType, empty_state
+from pipeline.state import AtsType, JobStatus, RawJobListing, SearchParams, WorkplaceType, empty_state
 from pipeline.agents.discoverer import (
     _make_fingerprint,
     _parse_compensation,
@@ -905,6 +905,197 @@ async def test_dry_run_prints_summary(tmp_path, monkeypatch, capsys):
     captured = capsys.readouterr().out
     assert "3" in captured
     assert any(f"{j.company}::{j.title}" in captured for j in shortlist)
+
+
+# ── F2: company::role dual dedup ──────────────────────────────────────────────
+
+
+def _mock_get_connection_with_rows(rows):
+    """Build a mock get_connection() returning the given list of dict rows."""
+
+    class FakeAsyncCursor:
+        def __init__(self, items):
+            self._iter = iter(items)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._iter)
+            except StopIteration:
+                raise StopAsyncIteration
+
+    class FakeConn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return None
+
+        async def execute(self, *a, **kw):
+            return FakeAsyncCursor(rows)
+
+    def factory():
+        return FakeConn()
+
+    return factory
+
+
+@pytest.mark.asyncio
+async def test_merge_suppresses_already_applied_company_role(monkeypatch):
+    """Same company+title at status=APPLIED (different URL/location) → suppressed."""
+    import pipeline.agents.discoverer as disc
+
+    raw = [
+        RawJobListing(
+            source="dice",
+            title="Senior Engineer",
+            company="Acme Corp",
+            location="Chicago, IL",
+            source_url="https://dice.com/j/new",
+        )
+    ]
+    raw_fp = _make_fingerprint("Acme Corp", "Senior Engineer", "Chicago, IL")
+    rows = [
+        {
+            # different fingerprint (different location) but same company::title
+            "fingerprint": "different_fp_111",
+            "status": "applied",
+            "company": "Acme Corp",
+            "title": "Senior Engineer",
+        }
+    ]
+    assert rows[0]["fingerprint"] != raw_fp
+    monkeypatch.setattr(disc, "get_connection", _mock_get_connection_with_rows(rows))
+
+    state = empty_state()
+    state["raw_results"] = raw  # type: ignore[assignment]
+    result = await disc.merge_results(state)
+    assert result["shortlist"] == []
+
+
+@pytest.mark.asyncio
+async def test_merge_suppresses_skipped_company_role(monkeypatch):
+    """Same company+title at status=SKIPPED (different fingerprint) → suppressed."""
+    import pipeline.agents.discoverer as disc
+
+    raw = [
+        RawJobListing(
+            source="linkedin",
+            title="Backend Engineer",
+            company="DataCo",
+            location="New York, NY",
+            source_url="https://linkedin.com/j/ignored",
+        )
+    ]
+    rows = [
+        {
+            "fingerprint": "unrelated_fp",
+            "status": "skipped",
+            "company": "DataCo",
+            "title": "Backend Engineer",
+        }
+    ]
+    monkeypatch.setattr(disc, "get_connection", _mock_get_connection_with_rows(rows))
+
+    state = empty_state()
+    state["raw_results"] = raw  # type: ignore[assignment]
+    result = await disc.merge_results(state)
+    assert result["shortlist"] == []
+
+
+@pytest.mark.asyncio
+async def test_merge_does_not_suppress_different_title_same_company(monkeypatch):
+    """Same company but different title → not suppressed."""
+    import pipeline.agents.discoverer as disc
+
+    raw = [
+        RawJobListing(
+            source="dice",
+            title="Staff Engineer",
+            company="Acme Corp",
+            location="Chicago, IL",
+            source_url="https://dice.com/j/staff",
+        )
+    ]
+    rows = [
+        {
+            "fingerprint": "some_fp",
+            "status": "applied",
+            "company": "Acme Corp",
+            "title": "Senior Engineer",  # different title
+        }
+    ]
+    monkeypatch.setattr(disc, "get_connection", _mock_get_connection_with_rows(rows))
+
+    state = empty_state()
+    state["raw_results"] = raw  # type: ignore[assignment]
+    result = await disc.merge_results(state)
+    assert len(result["shortlist"]) == 1
+    assert result["shortlist"][0].title == "Staff Engineer"
+
+
+@pytest.mark.asyncio
+async def test_merge_tags_queued_company_role_with_previously_seen_note(monkeypatch):
+    """Same company+title at status=QUEUED → kept but tagged with previously-seen note."""
+    import pipeline.agents.discoverer as disc
+
+    raw = [
+        RawJobListing(
+            source="linkedin",
+            title="Platform Engineer",
+            company="Beta Inc",
+            location="Remote",
+            source_url="https://linkedin.com/j/queued",
+        )
+    ]
+    rows = [
+        {
+            "fingerprint": "queued_fp",
+            "status": "queued",
+            "company": "Beta Inc",
+            "title": "Platform Engineer",
+        }
+    ]
+    monkeypatch.setattr(disc, "get_connection", _mock_get_connection_with_rows(rows))
+
+    state = empty_state()
+    state["raw_results"] = raw  # type: ignore[assignment]
+    result = await disc.merge_results(state)
+    assert len(result["shortlist"]) == 1
+    assert result["shortlist"][0].notes == "[previously seen — status: queued]"
+
+
+@pytest.mark.asyncio
+async def test_merge_tags_docs_ready_company_role_with_previously_seen_note(monkeypatch):
+    """Same company+title at status=DOCS_READY → kept but tagged with note."""
+    import pipeline.agents.discoverer as disc
+
+    raw = [
+        RawJobListing(
+            source="dice",
+            title="Rails Developer",
+            company="Gamma LLC",
+            location="Austin, TX",
+            source_url="https://dice.com/j/docs",
+        )
+    ]
+    rows = [
+        {
+            "fingerprint": "docs_ready_fp",
+            "status": "docs_ready",
+            "company": "Gamma LLC",
+            "title": "Rails Developer",
+        }
+    ]
+    monkeypatch.setattr(disc, "get_connection", _mock_get_connection_with_rows(rows))
+
+    state = empty_state()
+    state["raw_results"] = raw  # type: ignore[assignment]
+    result = await disc.merge_results(state)
+    assert len(result["shortlist"]) == 1
+    assert result["shortlist"][0].notes == "[previously seen — status: docs_ready]"
 
 
 def test_cli_dry_run_sets_state_true(monkeypatch):
