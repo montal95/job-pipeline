@@ -193,6 +193,9 @@ class PipelineState(TypedDict):
     errors: list[str]
     warnings: list[str]
 
+    # Discovery flags
+    dry_run: bool                    # preview discoverer results without DB writes
+
 
 def empty_state() -> PipelineState:
     """Return a zeroed PipelineState suitable as a graph initial input."""
@@ -224,4 +227,5 @@ def empty_state() -> PipelineState:
         human_feedback=None,
         errors=[],
         warnings=[],
+        dry_run=False,
     )

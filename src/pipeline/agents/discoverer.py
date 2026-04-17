@@ -1017,6 +1017,13 @@ async def persist_to_db(state: PipelineState) -> dict:
     approved = state.get("shortlist", [])
     if not approved:
         return {}
+    if state.get("dry_run"):
+        console.print(
+            f"DRY RUN — would save {len(approved)} jobs:", markup=False
+        )
+        for job in approved[:10]:
+            console.print(f"  {job.company}::{job.title}", markup=False)
+        return {}
     params = state["search_params"]
     run_id = str(uuid4())
     now = datetime.utcnow().isoformat()

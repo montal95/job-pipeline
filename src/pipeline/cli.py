@@ -280,12 +280,17 @@ def discover(
     location: str = typer.Option("Chicago, IL", "--location", "-l", help="Location filter"),
     remote: bool = typer.Option(True, "--remote/--no-remote", help="Include remote roles"),
     sources: str = typer.Option("indeed,dice", "--sources", "-s", help="Comma-separated sources"),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run/--no-dry-run",
+        help="Preview results without writing to the database.",
+    ),
 ):
     """Search configured job sources and present an interactive triage shortlist."""
-    run(_discover(query, location, remote, sources))
+    run(_discover(query, location, remote, sources, dry_run))
 
 
-async def _discover(query: str, location: str, remote: bool, sources: str):
+async def _discover(query: str, location: str, remote: bool, sources: str, dry_run: bool = False):
     from langgraph.errors import GraphInterrupt
     from langgraph.types import Command
 
@@ -316,6 +321,7 @@ async def _discover(query: str, location: str, remote: bool, sources: str):
     initial["search_params"] = SearchParams(
         query=query, location=location, remote=remote, sources=source_list
     )
+    initial["dry_run"] = dry_run
     config = {"configurable": {"thread_id": thread_id}}
 
     async with AsyncSqliteSaver.from_conn_string(checkpointer_path) as checkpointer:
