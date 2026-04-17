@@ -50,6 +50,10 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+*.bak
+
+# ── Claude Code workspace ─────────────────────────────────────────────────────
+.claude/
 
 scripts/list_queued.py
 
