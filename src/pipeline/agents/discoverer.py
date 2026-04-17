@@ -964,16 +964,25 @@ async def merge_results(state: PipelineState) -> dict:
             seen[fp] = listing
 
     suppress = {JobStatus.SKIPPED, JobStatus.APPLIED, JobStatus.SUBMITTED, JobStatus.OFFER}
+    note_set = {JobStatus.QUEUED, JobStatus.DOCS_DRAFT, JobStatus.DOCS_READY}
     previously_seen: dict[str, JobStatus] = {}
+    suppressed_company_roles: set[str] = set()
+    seen_company_roles: dict[str, JobStatus] = {}
     try:
         async with get_connection() as conn:
             async for row in await conn.execute(
-                "SELECT fingerprint, status FROM jobs WHERE fingerprint IN ({})".format(
+                "SELECT fingerprint, status, company, title FROM jobs WHERE fingerprint IN ({})".format(
                     ",".join("?" * len(seen))
                 ),
                 list(seen.keys()),
             ):
-                previously_seen[row["fingerprint"]] = JobStatus(row["status"])
+                status = JobStatus(row["status"])
+                previously_seen[row["fingerprint"]] = status
+                key = f"{(row['company'] or '').lower()}::{(row['title'] or '').lower()}"
+                if status in suppress:
+                    suppressed_company_roles.add(key)
+                elif status in note_set:
+                    seen_company_roles.setdefault(key, status)
     except Exception as exc:
         console.print(f"[yellow]⚠ DB lookup failed during merge: {exc}[/yellow]")
 
@@ -982,9 +991,15 @@ async def merge_results(state: PipelineState) -> dict:
         prior = previously_seen.get(fp)
         if prior in suppress:
             continue
+        company_role_key = f"{raw_listing.company.lower()}::{raw_listing.title.lower()}"
+        if company_role_key in suppressed_company_roles:
+            continue
         job = JobListing(**raw_listing.model_dump(), fingerprint=fp, ats_type=detect_ats(raw_listing.apply_url))
-        if prior in (JobStatus.QUEUED, JobStatus.DOCS_DRAFT, JobStatus.DOCS_READY):
+        if prior in note_set:
             job.notes = f"[previously seen — status: {prior.value}]"
+        elif company_role_key in seen_company_roles:
+            cr_prior = seen_company_roles[company_role_key]
+            job.notes = f"[previously seen — status: {cr_prior.value}]"
         shortlist.append(job)
 
     suppressed = len(seen) - len(shortlist)
