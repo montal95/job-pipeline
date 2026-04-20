@@ -1,44 +1,67 @@
 <!--
-  Minimal ZipRecruiter job search results page fixture.
-  Reflects the DOM structure of ziprecruiter.com/jobs-search as of early 2026.
-  Two complete cards + one missing company element (tests graceful skip).
-  Used by test_parse_ziprecruiter_cards_* tests — no live browser required.
+  ZipRecruiter job search results page — DOM reference fixture.
+  Reflects the confirmed live DOM structure as of March 2026.
+
+  Extraction method: Playwright page.evaluate() using innerText.split('\n')
+  NOT BeautifulSoup — this file is a DOM reference, not a BS4 test input.
+  Unit tests use inline Python dict fixtures (ZR_FIXTURE in test_discoverer.py)
+  matching the shape returned by page.evaluate().
+
+  Card selector: div[class*="job_result"]
+  Extraction shape per card:
+    lines[0] = company
+    lines[1] = title
+    lines[2] = location (format: "Chicago, IL · Remote" — split on · for workplace type)
+    lines[find $] = salary (e.g. "$105.60K - $144.70K/yr") or absent
+    url = first <a> href containing job detail path
+
+  Confirmed live examples (scraper run 2026-03-26):
+    YO IT CONSULTING · Ruby on Rails Developer - LLM · Chicago, IL · Remote · $105.60K-$144.70K/yr
+    AppFolio · Sr. Software Engineer - Accounting · Chicago, IL · On-site · $126K-$166K/yr
+    Halo · Software Engineer · Chicago, IL (no salary)
 -->
 <html>
 <body>
-  <div class="job_results">
+  <div class="job_results_container">
 
-    <article class="job_result" data-job-id="zr-001">
-      <h2 class="job_title">
-        <a class="job_link" href="/c/Acme-Corp/j/Senior-Software-Engineer/?lvk=zr001">
-          Senior Software Engineer
-        </a>
-      </h2>
-      <a class="company_name" href="/c/Acme-Corp">Acme Corp</a>
-      <span class="location">Chicago, IL</span>
-      <span class="compensation">$120,000 - $150,000/yr</span>
-    </article>
+    <!-- Card 1: role with salary + remote workplace -->
+    <div class="job_result_two_pane_v2 md:flex md:flex-col relative group w-full">
+      <a class="relative z-[2] break-words text-primary" href="/co/YO-IT-CONSULTING/Jobs?lvk=abc123">
+        YO IT CONSULTING
+      </a>
+      <a class="relative z-[2] break-words text-primary" href="/jobs/yo-it-consulting/ruby-on-rails-developer?lvk=abc123">
+        Ruby on Rails Developer - LLM
+      </a>
+      <span>Chicago, IL · Remote</span>
+      <span>Estimated pay</span>
+      <span>$105.60K - $144.70K/yr</span>
+      <span>1-click apply</span>
+    </div>
 
-    <article class="job_result" data-job-id="zr-002">
-      <h2 class="job_title">
-        <a class="job_link" href="/c/DataCo/j/AI-Engineer/?lvk=zr002">
-          AI Engineer
-        </a>
-      </h2>
-      <a class="company_name" href="/c/DataCo">DataCo</a>
-      <span class="location">Remote</span>
-      <span class="compensation">$160,000 - $200,000/yr</span>
-    </article>
+    <!-- Card 2: role with salary + on-site workplace -->
+    <div class="job_result_two_pane_v2 md:flex md:flex-col relative group w-full">
+      <a class="relative z-[2] break-words text-primary" href="/co/AppFolio/Jobs?lvk=def456">
+        AppFolio
+      </a>
+      <a class="relative z-[2] break-words text-primary" href="/jobs/appfolio/sr-software-engineer?lvk=def456">
+        Sr. Software Engineer - Accounting
+      </a>
+      <span>Chicago, IL · On-site</span>
+      <span>$126K - $166K/yr</span>
+      <span>1-click apply</span>
+    </div>
 
-    <article class="job_result" data-job-id="zr-003">
-      <h2 class="job_title">
-        <a class="job_link" href="/c/HealthTech/j/Backend-Engineer/?lvk=zr003">
-          Backend Engineer
-        </a>
-      </h2>
-      <!-- company element intentionally absent — tests graceful skip -->
-      <span class="location">Chicago, IL</span>
-    </article>
+    <!-- Card 3: role with no salary -->
+    <div class="job_result_two_pane_v2 md:flex md:flex-col relative group w-full">
+      <a class="relative z-[2] break-words text-primary" href="/co/Halo/Jobs?lvk=ghi789">
+        Halo
+      </a>
+      <a class="relative z-[2] break-words text-primary" href="/jobs/halo/software-engineer?lvk=ghi789">
+        Software Engineer
+      </a>
+      <span>Chicago, IL</span>
+      <span>1-click apply</span>
+    </div>
 
   </div>
 </body>

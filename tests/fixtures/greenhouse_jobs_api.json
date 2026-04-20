@@ -1,0 +1,25 @@
+{
+  "jobs": [
+    {
+      "id": 4001001,
+      "title": "Senior Backend Engineer",
+      "absolute_url": "https://boards.greenhouse.io/acme/jobs/4001001",
+      "location": {"name": "Remote · United States"},
+      "updated_at": "2026-04-10T15:22:10-07:00"
+    },
+    {
+      "id": 4001002,
+      "title": "Staff Platform Engineer",
+      "absolute_url": "https://boards.greenhouse.io/acme/jobs/4001002",
+      "location": {"name": "New York, NY"},
+      "updated_at": "2026-04-09T11:04:22-07:00"
+    },
+    {
+      "id": 4001003,
+      "title": "Engineering Manager, Platform",
+      "absolute_url": "https://boards.greenhouse.io/acme/jobs/4001003",
+      "location": {"name": "San Francisco, CA"},
+      "updated_at": "2026-04-08T09:41:07-07:00"
+    }
+  ]
+}

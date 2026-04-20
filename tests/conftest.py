@@ -128,6 +128,14 @@ def mock_llm_message():
 
 
 @pytest.fixture()
+def mock_cl_llm_message():
+    """MagicMock mimicking an Anthropic response containing the sample cover letter JSON fixture."""
+    msg = MagicMock()
+    msg.content = [MagicMock(text=(FIXTURES / "sample_cover_letter_llm_response.json").read_text(encoding="utf-8"))]
+    return msg
+
+
+@pytest.fixture()
 def tracker_db(tmp_path):
     """
     SQLite DB with all migrations applied and a small set of jobs + submissions

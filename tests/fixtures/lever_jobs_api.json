@@ -1,0 +1,29 @@
+[
+  {
+    "id": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+    "text": "Senior Backend Engineer",
+    "hostedUrl": "https://jobs.lever.co/acme/a1b2c3d4-5678-90ab-cdef-1234567890ab",
+    "applyUrl": "https://jobs.lever.co/acme/a1b2c3d4-5678-90ab-cdef-1234567890ab/apply",
+    "categories": {
+      "team": "Engineering",
+      "department": "Engineering",
+      "location": "Remote - US",
+      "commitment": "Full-time"
+    },
+    "additional": "Compensation: $160,000 - $200,000 base",
+    "descriptionPlain": "We're hiring a senior backend engineer. Salary: $160,000 - $200,000"
+  },
+  {
+    "id": "b2c3d4e5-6789-01bc-defa-234567890abc",
+    "text": "Principal Engineer, Infrastructure",
+    "hostedUrl": "https://jobs.lever.co/acme/b2c3d4e5-6789-01bc-defa-234567890abc",
+    "applyUrl": "https://jobs.lever.co/acme/b2c3d4e5-6789-01bc-defa-234567890abc/apply",
+    "categories": {
+      "team": "Infrastructure",
+      "department": "Engineering",
+      "location": "San Francisco, CA",
+      "commitment": "Full-time"
+    },
+    "descriptionPlain": "Lead our infra team."
+  }
+]

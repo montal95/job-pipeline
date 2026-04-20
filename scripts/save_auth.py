@@ -38,6 +38,7 @@ PLATFORM_CONFIG: dict[str, dict] = {
         "auth_file": "ziprecruiter.json",
         "ready_hint": "Log in to ZipRecruiter, then wait until you can see job matches.",
     },
+    # "indeed" removed — Playwright fingerprint detected at login form level (INDEED_PARKED)
 }
 
 def _dry_run(platforms: list[str]) -> None:

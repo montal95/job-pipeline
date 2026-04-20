@@ -20,9 +20,18 @@ Usage (after `uv pip install -e .`):
 from __future__ import annotations
 
 import asyncio
+import io
 import os
+import sys
 import warnings
 import logging
+
+# Force UTF-8 output on Windows — prevents UnicodeEncodeError on rich unicode
+# symbols (✓, ✗, →, etc.) when the console code page is cp1252.
+if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if sys.platform == "win32" and hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 # TODO: Remove these suppression blocks once pipeline.state types are properly registered
 # in LangGraph's msgpack allow-list. Proper fix: register via `allowed_msgpack_modules`
@@ -48,7 +57,7 @@ from rich.console import Console
 from rich.table import Table
 from rich import box
 
-console = Console()
+console = Console(legacy_windows=False)
 app = typer.Typer(
     name="pipeline",
     help="LangGraph multi-agent job application pipeline.",
@@ -270,13 +279,22 @@ def discover(
     query: str = typer.Option("software engineer", "--query", "-q", help="Job title or keyword"),
     location: str = typer.Option("Chicago, IL", "--location", "-l", help="Location filter"),
     remote: bool = typer.Option(True, "--remote/--no-remote", help="Include remote roles"),
-    sources: str = typer.Option("indeed,dice", "--sources", "-s", help="Comma-separated sources"),
+    sources: str = typer.Option(
+        "dice,linkedin,ziprecruiter,builtin,target_companies",
+        "--sources", "-s",
+        help="Comma-separated sources",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run/--no-dry-run",
+        help="Preview results without writing to the database.",
+    ),
 ):
     """Search configured job sources and present an interactive triage shortlist."""
-    run(_discover(query, location, remote, sources))
+    run(_discover(query, location, remote, sources, dry_run))
 
 
-async def _discover(query: str, location: str, remote: bool, sources: str):
+async def _discover(query: str, location: str, remote: bool, sources: str, dry_run: bool = False):
     from langgraph.errors import GraphInterrupt
     from langgraph.types import Command
 
@@ -307,6 +325,7 @@ async def _discover(query: str, location: str, remote: bool, sources: str):
     initial["search_params"] = SearchParams(
         query=query, location=location, remote=remote, sources=source_list
     )
+    initial["dry_run"] = dry_run
     config = {"configurable": {"thread_id": thread_id}}
 
     async with AsyncSqliteSaver.from_conn_string(checkpointer_path) as checkpointer:
@@ -368,35 +387,114 @@ def _collect_interview_answers(interrupt_val: dict) -> dict:
 
 def _collect_review_decision(interrupt_val: dict) -> str:
     """
-    Show generated doc paths and prompt the user to approve, abort, or provide feedback.
+    Show resume preview and prompt for approve / abort / feedback.
+    Cover letter is shown separately at the cl_review_interrupt gate.
     Returns "approve", "abort", or a feedback string.
     """
-    resume_path = interrupt_val.get("resume_path")
-    cl_path = interrupt_val.get("cover_letter_path")
+    resume_preview = interrupt_val.get("resume_preview", "(no resume content)")
+    resume_content = interrupt_val.get("resume_content")
 
-    console.print("\n[bold]Documents ready for review:[/bold]")
-    console.print(f"  Resume:       [cyan]{resume_path or 'not found'}[/cyan]")
-    console.print(f"  Cover letter: [cyan]{cl_path or 'not found'}[/cyan]")
-    console.print("\n  [green]approve[/green] — submit as-is")
-    console.print("  [red]abort[/red]   — discard and exit")
+    console.print("\n[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]")
+    console.print("[bold]RESUME PREVIEW[/bold]")
+    console.print("[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]\n")
+
+    if resume_content and hasattr(resume_content, "name"):
+        console.print(f"[bold]{resume_content.name}[/bold]")
+        # Contact: two lines split on \n — line 1: city/phone/email, line 2: socials
+        contact_lines = resume_content.contact.split("\\n") if "\\n" in resume_content.contact else resume_content.contact.split("\n")
+        for line in contact_lines:
+            console.print(f"[dim]{line.strip()}[/dim]")
+        console.print()
+        console.print(f"[bold]Summary[/bold]\n{resume_content.summary}\n")
+
+        # Skills — escape Rich markup brackets, strip any leftover ** markers
+        if resume_content.skills:
+            console.print(f"[bold yellow]Skills[/bold yellow]")
+            for skill in resume_content.skills:
+                clean = skill.replace("**", "")
+                console.print(f"  {clean}", markup=False, highlight=False)
+            console.print()
+
+        for section in resume_content.sections:
+            # Skip empty sections (e.g. LLM put "SKILLS & TECHNOLOGIES" as a section with no bullets)
+            if not section.bullets:
+                continue
+            console.print(f"[bold yellow]{section.heading}[/bold yellow]")
+            for bullet in section.bullets:
+                clean = bullet.replace("**", "").strip()
+                # Employer line: "Company · Location | Role | Dates"
+                if "|" in clean and "·" in clean:
+                    console.print(f"\n  [bold]{clean}[/bold]")
+                # Project line: "Project Name — description"
+                elif " — " in clean:
+                    console.print(f"\n    [bold cyan]{clean}[/bold cyan]")
+                # Stack line
+                elif clean.startswith("Stack:"):
+                    console.print(f"    {clean}", markup=False, highlight=False)
+                else:
+                    console.print(f"    • {clean}", markup=False, highlight=False)
+            console.print()
+    else:
+        console.print(resume_preview)
+
+    console.print("\n[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]\n")
+    console.print("  [green]y / yes[/green] — accept and save")
+    console.print("  [red]n / no[/red]   — discard and exit")
     console.print("  [dim]<feedback>[/dim] — type feedback to revise\n")
 
-    decision = console.input("  Decision: ").strip()
+    decision = console.input("  Decision: ").strip().lower()
+    if decision in ("y", "yes"):
+        return "approve"
+    if decision in ("n", "no"):
+        return "abort"
     return decision if decision else "approve"
 
 
-# ── Write ──────────────────────────────────────────────────────────────────────
+def _collect_cl_decision(interrupt_val: dict) -> str:
+    """
+    Show cover letter preview and prompt for approve / abort / feedback.
+    Returns "approve", "abort", or a feedback string.
+    """
+    cl_content = interrupt_val.get("cover_letter_content")
+
+    console.print("\n[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]")
+    console.print("[bold]COVER LETTER PREVIEW[/bold]")
+    console.print("[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]\n")
+
+    if cl_content and hasattr(cl_content, "opening"):
+        console.print(cl_content.opening, markup=False, highlight=False)
+        console.print()
+        for para in cl_content.body_paragraphs:
+            console.print(para, markup=False, highlight=False)
+            console.print()
+        console.print(cl_content.closing, markup=False, highlight=False)
+    else:
+        console.print(interrupt_val.get("cover_letter_preview", "(no cover letter content)"))
+
+    console.print("\n[bold cyan]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/bold cyan]\n")
+    console.print("  [green]y / yes[/green] — accept and save")
+    console.print("  [red]n / no[/red]   — discard and exit")
+    console.print("  [dim]<feedback>[/dim] — type feedback to revise\n")
+
+    decision = console.input("  Decision: ").strip().lower()
+    if decision in ("y", "yes"):
+        return "approve"
+    if decision in ("n", "no"):
+        return "abort"
+    return decision if decision else "approve"
 
 
 @app.command()
 def write(
     job_id: str = typer.Argument(..., help="Job ID from the database"),
+    resume_only: bool = typer.Option(False, "--resume-only", "-r", help="Generate and review resume only, skip cover letter."),
+    cover_letter_only: bool = typer.Option(False, "--cover-letter-only", "-c", help="Generate and review cover letter only, skip resume."),
 ):
     """Generate tailored resume and cover letter for a specific job."""
-    run(_write(job_id))
+    run(_write(job_id, resume_only=resume_only, cover_letter_only=cover_letter_only))
 
 
-async def _write(job_id: str):
+async def _write(job_id: str, resume_only: bool = False, cover_letter_only: bool = False):
     from pathlib import Path
 
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -419,6 +517,8 @@ async def _write(job_id: str):
 
         initial = empty_state()
         initial["current_job_id"] = job_id
+        initial["write_resume_only"] = resume_only
+        initial["write_cover_letter_only"] = cover_letter_only
 
         # First invoke — runs load_job → fetch_cv → research_company
         # then hits pre_write_interview interrupt
@@ -448,10 +548,21 @@ async def _write(job_id: str):
                 except GraphInterrupt:
                     pass
 
-            elif "resume_path" in interrupt_data:
-                # review_interrupt gate
+            elif interrupt_data.get("gate") == "resume":
+                # resume_review_interrupt — shows resume + CL (combined in full flow)
                 decision = _collect_review_decision(interrupt_data)
-                if decision.strip().lower() == "abort":
+                if decision.strip().lower() in ("abort", "n", "no"):
+                    console.print("[yellow]Application aborted.[/yellow]")
+                    break
+                try:
+                    await graph.ainvoke(Command(resume=decision), config=config)
+                except GraphInterrupt:
+                    pass
+
+            elif interrupt_data.get("gate") == "cover_letter":
+                # cl_review_interrupt — dedicated CL revision loop
+                decision = _collect_cl_decision(interrupt_data)
+                if decision.strip().lower() in ("abort", "n", "no"):
                     console.print("[yellow]Application aborted.[/yellow]")
                     break
                 try:
@@ -635,6 +746,68 @@ async def _run_pipeline(query: str, location: str, remote: bool):
 
     # Step 3: Tracker dashboard
     await _track()
+
+
+# ── Liveness check ─────────────────────────────────────────────────────────────
+
+
+@app.command("check-liveness")
+def check_liveness_cmd(
+    job_id: str = typer.Argument(..., help="Job ID from the database"),
+):
+    """Check whether a job posting is still accepting applications."""
+    run(_check_liveness(job_id))
+
+
+async def _check_liveness(job_id: str):
+    from pipeline.agents.liveness import check_job_liveness
+    from pipeline.database import get_connection
+    from pipeline.state import JobStatus
+
+    async with get_connection() as conn:
+        cursor = await conn.execute(
+            "SELECT id, title, company, source_url, status FROM jobs WHERE id = ?",
+            (job_id,),
+        )
+        row = await cursor.fetchone()
+
+    if row is None:
+        console.print(f"No job found with id {job_id}", markup=False)
+        raise typer.Exit(code=1)
+
+    url = row["source_url"]
+    console.print(
+        f"Checking liveness: {row['title']} @ {row['company']}", markup=False
+    )
+    console.print(f"  URL: {url}", markup=False)
+
+    result, reason = await check_job_liveness(url)
+    console.print(f"Result: {result} ({reason})", markup=False)
+
+    if result == "expired":
+        update = typer.confirm(
+            "Update status to possibly_inactive?", default=False
+        )
+        if update:
+            async with get_connection() as conn:
+                await conn.execute(
+                    "UPDATE jobs SET status = ? WHERE id = ?",
+                    (JobStatus.POSSIBLY_INACTIVE.value, job_id),
+                )
+                await conn.commit()
+            console.print(
+                f"Status updated to {JobStatus.POSSIBLY_INACTIVE.value}.",
+                markup=False,
+            )
+        else:
+            console.print("Status unchanged.", markup=False)
+    elif result == "uncertain":
+        console.print(
+            "Result uncertain — no status change suggested; verify manually.",
+            markup=False,
+        )
+    else:
+        console.print("Job appears active — no action needed.", markup=False)
 
 
 # ── DB management ──────────────────────────────────────────────────────────────

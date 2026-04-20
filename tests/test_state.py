@@ -39,7 +39,10 @@ def test_search_params_defaults():
     params = SearchParams(query="rails engineer", location="Chicago, IL")
     assert params.remote is True
     assert params.max_results_per_source == 25
-    assert "indeed" in params.sources
+    # Indeed dropped in F5-T6 (flaky scraper); builtin + target_companies added.
+    assert "dice" in params.sources
+    assert "target_companies" in params.sources
+    assert "indeed" not in params.sources
 
 
 def test_raw_job_listing_minimal():

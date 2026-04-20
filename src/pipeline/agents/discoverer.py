@@ -29,6 +29,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 from urllib.parse import quote_plus
 from uuid import uuid4
 
@@ -40,7 +41,9 @@ from rich.console import Console
 from rich.table import Table
 from rich import box
 
+from pipeline.agents.company_scanner import scrape_target_companies
 from pipeline.ats import ATS_PATTERNS, detect_ats
+from pipeline.config import settings
 from pipeline.database import get_connection
 from pipeline.state import (
     AtsType,
@@ -147,6 +150,31 @@ def _extract_salary_from_description(description: str) -> tuple[int | None, int 
     return None, None
 
 
+def _build_title_filter(
+    positive: list[str], negative: list[str]
+) -> Callable[[str], bool]:
+    """
+    Build a predicate that returns True if a title should pass the filter.
+
+    - Negative keywords take priority: any match → rejected.
+    - Empty positive list → all non-negative titles pass.
+    - Non-empty positive list → at least one positive keyword must match.
+    Matching is case-insensitive substring.
+    """
+    neg = [kw.lower() for kw in negative if kw.strip()]
+    pos = [kw.lower() for kw in positive if kw.strip()]
+
+    def allow(title: str) -> bool:
+        lowered = title.lower()
+        if any(kw in lowered for kw in neg):
+            return False
+        if not pos:
+            return True
+        return any(kw in lowered for kw in pos)
+
+    return allow
+
+
 def _get_auth_path(platform: str) -> Path:
     """Return the storage_state auth file path for a given platform."""
     return AUTH_DIR / f"{platform}.json"
@@ -244,40 +272,55 @@ def _parse_linkedin_cards(html: str) -> list[RawJobListing]:
 
 def _parse_ziprecruiter_cards(html: str) -> list[RawJobListing]:
     """
-    Parse ZipRecruiter job search results HTML into RawJobListing objects.
-    Pure function — no browser dependency, fully unit testable.
+    DEPRECATED: Previously used BS4 HTML parsing. Retained as a no-op stub
+    so import references don't break. Actual parsing is done via Playwright
+    JS extraction — see _transform_ziprecruiter_jobs().
     """
-    soup = BeautifulSoup(html, "html.parser")
+    return []
+
+
+def _transform_ziprecruiter_jobs(
+    jobs_data: list[dict], default_location: str = ""
+) -> list[RawJobListing]:
+    """
+    Transform raw JS-extracted ZipRecruiter card data into RawJobListing objects.
+    Pure function — no browser dependency, fully unit testable.
+
+    Each dict in jobs_data has the shape returned by the Playwright page.evaluate():
+      {
+        'company': str,
+        'title': str,
+        'location': str,   # e.g. "Chicago, IL · Remote"
+        'salary': str,     # e.g. "$105.60K - $144.70K/yr" or ""
+        'url': str,
+      }
+    """
     results: list[RawJobListing] = []
-    for card in soup.select("article.job_result"):
-        title_el = card.select_one("h2.job_title a.job_link")
-        company_el = card.select_one("a.company_name")
-        location_el = card.select_one("span.location")
-        salary_el = card.select_one("span.compensation")
-        if not (title_el and company_el):
+    for job in jobs_data:
+        company = job.get("company", "") or "Unknown"
+        title = job.get("title", "")
+        if not title or not company or company == "Unknown" and not title:
             continue
-        title = title_el.get_text(strip=True)
-        company = company_el.get_text(strip=True)
-        location = location_el.get_text(strip=True) if location_el else ""
-        href = title_el.get("href", "")
-        source_url = (
-            f"https://www.ziprecruiter.com{href}" if href.startswith("/") else href
-        )
-        comp_low, comp_high = _parse_compensation(
-            salary_el.get_text(strip=True) if salary_el else ""
-        )
-        loc_lower = location.lower()
+        location_raw = job.get("location", "") or default_location
+        location_parts = [p.strip() for p in location_raw.split("·")]
+        location = location_parts[0] if location_parts else location_raw
+        workplace_hint = location_parts[1].lower() if len(location_parts) > 1 else ""
+        salary_str = job.get("salary", "")
+        url = job.get("url", "")
+        comp_low, comp_high = _parse_compensation(salary_str)
+        if not comp_low:
+            comp_low, comp_high = _extract_salary_from_description(salary_str + "\n" + title)
         workplace = (
-            WorkplaceType.REMOTE if "remote" in loc_lower
-            else WorkplaceType.HYBRID if "hybrid" in loc_lower
-            else None
+            WorkplaceType.REMOTE if "remote" in workplace_hint else
+            WorkplaceType.HYBRID if "hybrid" in workplace_hint else
+            WorkplaceType.ONSITE if "on-site" in workplace_hint or "onsite" in workplace_hint else None
         )
         results.append(RawJobListing(
             source="ziprecruiter",
             title=title,
             company=company,
-            location=location.replace("(Remote)", "").replace("(Hybrid)", "").strip(),
-            source_url=source_url,
+            location=location,
+            source_url=url,
             compensation_low=comp_low,
             compensation_high=comp_high,
             workplace_type=workplace,
@@ -290,67 +333,97 @@ def _parse_ziprecruiter_cards(html: str) -> list[RawJobListing]:
 
 async def scrape_indeed(state: PipelineState) -> dict:
     """
-    Scrape Indeed via Playwright (headless=False, no auth).
-    httpx returns 403 — a real browser bypasses Indeed's bot detection.
-    The existing BS4 card selectors are reused unchanged.
-    """
-    if async_playwright is None:
-        console.print("[yellow]⚠ Playwright not available — skipping Indeed[/yellow]")
-        return {"raw_results": []}
+    PARKED — Playwright fingerprint detected at login form level (March 2026).
+    grep: INDEED_PARKED
 
-    params = state["search_params"]
-    query_str = params.query + (" remote" if params.remote else "")
-    url = (
-        f"https://www.indeed.com/jobs"
-        f"?q={quote_plus(query_str)}"
-        f"&l={quote_plus(params.location)}"
-        f"&sort=date&limit={params.max_results_per_source}"
-    )
-    results: list[RawJobListing] = []
-    try:
-        import asyncio as _asyncio
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=False, channel="chrome")
-            page = await browser.new_page()
-            await page.goto(url, wait_until="domcontentloaded")
-            await _asyncio.sleep(3)  # let JS render job cards
-            # Wait for at least one card selector to appear
-            for sel in ("div.job_seen_beacon", "div.tapItem", "li.css-5lfssm"):
-                try:
-                    await page.wait_for_selector(sel, timeout=5000)
-                    break
-                except Exception:
-                    continue
-            html = await page.content()
-            await browser.close()
-        soup = BeautifulSoup(html, "html.parser")
-        cards = soup.select("li.css-5lfssm, div.job_seen_beacon, div.tapItem")
-        for card in cards[:params.max_results_per_source]:
-            title_el = card.select_one("h2.jobTitle span[title], h2.jobTitle a span")
-            company_el = card.select_one("span.companyName, [data-testid='company-name']")
-            location_el = card.select_one("div.companyLocation, [data-testid='text-location']")
-            link_el = card.select_one("a[id^='job_'], a.jcs-JobTitle, h2.jobTitle a")
-            salary_el = card.select_one("div.metadata.salary-snippet-container")
-            if not (title_el and company_el):
-                continue
-            title = title_el.get("title") or title_el.get_text(strip=True)
-            company = company_el.get_text(strip=True)
-            location = location_el.get_text(strip=True) if location_el else params.location
-            href = link_el.get("href", "") if link_el else ""
-            source_url = f"https://www.indeed.com{href}" if href.startswith("/") else href
-            comp_low, comp_high = _parse_compensation(
-                salary_el.get_text(strip=True) if salary_el else ""
-            )
-            results.append(RawJobListing(
-                source="indeed", title=title, company=company, location=location,
-                source_url=source_url or url, compensation_low=comp_low,
-                compensation_high=comp_high,
-                workplace_type=WorkplaceType.REMOTE if "remote" in location.lower() else None,
-            ))
-    except Exception as exc:
-        console.print(f"[yellow]⚠ Indeed scrape error: {exc}[/yellow]")
-    console.print(f"[dim]Indeed: {len(results)} listings[/dim]")
-    return {"raw_results": results}
+    Indeed detects Playwright on the login form itself before any CAPTCHA can
+    be solved — storage_state auth cannot be saved. Block is browser-fingerprint
+    based, not IP based (unlike Wellfound).
+
+    Full implementation preserved in commented code below. Card selectors and
+    BS4 parsing logic were confirmed working against Indeed's HTML structure.
+
+    Potential workarounds to research (same as Wellfound):
+      1. playwright-extra + puppeteer-extra-plugin-stealth (patches fingerprint)
+      2. Residential proxy with real browser headers
+      3. Indeed Publisher API (requires application approval)
+    """
+    console.print("[dim]Indeed: parked (Playwright fingerprint detected) — skipping[/dim]")
+    return {"raw_results": []}
+
+
+# # ── scrape_indeed full implementation (INDEED_PARKED) ────────────────────────
+# # Uncomment and re-wire into SOURCE_NODE_MAP + build_discoverer_graph when
+# # a workaround for Indeed's Playwright fingerprint detection is found.
+# #
+# # Card selectors confirmed against Indeed's HTML structure:
+# #   li.css-5lfssm, div.job_seen_beacon, div.tapItem
+# #   title:    h2.jobTitle span[title] or h2.jobTitle a span
+# #   company:  span.companyName or [data-testid='company-name']
+# #   location: div.companyLocation or [data-testid='text-location']
+# #   link:     a[id^='job_'], a.jcs-JobTitle, h2.jobTitle a
+# #   salary:   div.metadata.salary-snippet-container
+# #
+# async def _scrape_indeed_impl(state: PipelineState) -> dict:
+#     if async_playwright is None:
+#         return {"raw_results": []}
+#     params = state["search_params"]
+#     query_str = params.query + (" remote" if params.remote else "")
+#     url = (
+#         f"https://www.indeed.com/jobs"
+#         f"?q={quote_plus(query_str)}"
+#         f"&l={quote_plus(params.location)}"
+#         f"&sort=date&limit={params.max_results_per_source}"
+#     )
+#     auth_path = _get_auth_path("indeed")
+#     results: list[RawJobListing] = []
+#     try:
+#         import asyncio as _asyncio
+#         async with async_playwright() as p:
+#             browser = await p.chromium.launch(headless=False, channel="chrome")
+#             context = (
+#                 await browser.new_context(storage_state=str(auth_path))
+#                 if auth_path.exists()
+#                 else await browser.new_context()
+#             )
+#             page = await context.new_page()
+#             await page.goto(url, wait_until="domcontentloaded")
+#             await _asyncio.sleep(3)
+#             for sel in ("div.job_seen_beacon", "div.tapItem", "li.css-5lfssm"):
+#                 try:
+#                     await page.wait_for_selector(sel, timeout=5000)
+#                     break
+#                 except Exception:
+#                     continue
+#             html = await page.content()
+#             await browser.close()
+#         soup = BeautifulSoup(html, "html.parser")
+#         for card in soup.select("li.css-5lfssm, div.job_seen_beacon, div.tapItem")[:params.max_results_per_source]:
+#             title_el = card.select_one("h2.jobTitle span[title], h2.jobTitle a span")
+#             company_el = card.select_one("span.companyName, [data-testid='company-name']")
+#             location_el = card.select_one("div.companyLocation, [data-testid='text-location']")
+#             link_el = card.select_one("a[id^='job_'], a.jcs-JobTitle, h2.jobTitle a")
+#             salary_el = card.select_one("div.metadata.salary-snippet-container")
+#             if not (title_el and company_el):
+#                 continue
+#             title = title_el.get("title") or title_el.get_text(strip=True)
+#             company = company_el.get_text(strip=True)
+#             location = location_el.get_text(strip=True) if location_el else params.location
+#             href = link_el.get("href", "") if link_el else ""
+#             source_url = f"https://www.indeed.com{href}" if href.startswith("/") else href
+#             comp_low, comp_high = _parse_compensation(
+#                 salary_el.get_text(strip=True) if salary_el else ""
+#             )
+#             results.append(RawJobListing(
+#                 source="indeed", title=title, company=company, location=location,
+#                 source_url=source_url or url, compensation_low=comp_low,
+#                 compensation_high=comp_high,
+#                 workplace_type=WorkplaceType.REMOTE if "remote" in location.lower() else None,
+#             ))
+#     except Exception as exc:
+#         console.print(f"[yellow]⚠ Indeed scrape error: {exc}[/yellow]")
+#     console.print(f"[dim]Indeed: {len(results)} listings[/dim]")
+#     return {"raw_results": results}
 
 
 # ── Dice scraper (JSON API, no auth) ──────────────────────────────────────────
@@ -536,15 +609,16 @@ async def scrape_linkedin(state: PipelineState) -> dict:
 
 async def scrape_ziprecruiter(state: PipelineState) -> dict:
     """
-    Scrape ZipRecruiter job search via Playwright with a saved auth session.
-    Windows only. Requires playwright/.auth/ziprecruiter.json from save_auth.py.
+    Scrape ZipRecruiter via Playwright (headless=False, no auth required).
+    Public job search works without login. Bot detection blocks authenticated
+    sessions but the public search page renders job cards freely.
+
+    Card structure (confirmed via DevTools inspection):
+      div[class*="job_result"] contains:
+      lines: [company, title, location (city · workplace_type), salary?, ...]
     """
-    auth_path = _get_auth_path("ziprecruiter")
-    if not auth_path.exists():
-        console.print(
-            "[yellow]⚠ ZipRecruiter auth file not found. "
-            "Run: python scripts/save_auth.py --platform ziprecruiter[/yellow]"
-        )
+    if async_playwright is None:
+        console.print("[yellow]⚠ Playwright not available — skipping ZipRecruiter[/yellow]")
         return {"raw_results": []}
 
     params = state["search_params"]
@@ -554,23 +628,40 @@ async def scrape_ziprecruiter(state: PipelineState) -> dict:
         f"&location={quote_plus(params.location)}"
     )
     results: list[RawJobListing] = []
+    jobs_data: list[dict] = []
     try:
+        import asyncio as _asyncio
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, channel="chrome")
-            context = await browser.new_context(storage_state=str(auth_path))
-            page = await context.new_page()
+            browser = await p.chromium.launch(headless=False, channel="chrome")
+            page = await browser.new_page()
             await page.goto(search_url, wait_until="domcontentloaded")
-            await page.wait_for_selector("article.job_result", timeout=10000)
-            if _is_login_redirect(page.url, "ziprecruiter"):
-                console.print(
-                    "[yellow]⚠ ZipRecruiter session expired. "
-                    "Run: python scripts/save_auth.py --platform ziprecruiter[/yellow]"
-                )
+            await _asyncio.sleep(3)
+            try:
+                await page.wait_for_selector("div[class*='job_result']", timeout=10000)
+            except Exception:
+                console.print("[yellow]⚠ ZipRecruiter: job cards did not appear[/yellow]")
                 await browser.close()
                 return {"raw_results": []}
-            html = await page.content()
+            jobs_data = await page.evaluate("""() => {
+                const cards = document.querySelectorAll('div[class*="job_result"]');
+                return Array.from(cards).map(card => {
+                    const lines = card.innerText.split('\\n').map(s => s.trim()).filter(Boolean);
+                    const link = card.querySelector('a[class*="job_link"], h2 a, a[class*="title"]')
+                                 || card.querySelector('a');
+                    return {
+                        company: lines[0] || '',
+                        title: lines[1] || '',
+                        location: lines[2] || '',
+                        salary: lines.find(l => l.includes('$')) || '',
+                        url: link ? link.href : '',
+                    };
+                });
+            }""")
             await browser.close()
-        results = _parse_ziprecruiter_cards(html)
+
+        results = _transform_ziprecruiter_jobs(
+            jobs_data[:params.max_results_per_source], params.location
+        )
     except Exception as exc:
         console.print(f"[yellow]⚠ ZipRecruiter scrape error: {exc}[/yellow]")
     console.print(f"[dim]ZipRecruiter: {len(results)} listings[/dim]")
@@ -580,11 +671,290 @@ async def scrape_ziprecruiter(state: PipelineState) -> dict:
 # ── Graph nodes ────────────────────────────────────────────────────────────────
 
 
+
+# ── Built In scraper (Playwright, no auth) ────────────────────────────────────
+
+
+def _transform_builtin_jobs(jobs_data: list[dict]) -> list[RawJobListing]:
+    """
+    Transform raw JS-extracted Built In card data into RawJobListing objects.
+    Pure function — no browser dependency, fully unit testable.
+
+    Each dict has the shape returned by the Playwright page.evaluate():
+      { company, title, workplace, location, salary, url }
+    Salary format: "165K-195K Annually" or None.
+    """
+    results: list[RawJobListing] = []
+    for job in jobs_data:
+        company = job.get("company", "") or "Unknown"
+        title = job.get("title", "")
+        if not title:
+            continue
+        workplace_raw = (job.get("workplace") or "").lower()
+        location_raw = job.get("location") or ""
+        # Keep specific city/state (e.g. "Chicago, IL, USA"), normalize vague country entries to blank
+        vague = {"usa", "us", "united states", "2 locations", ""}
+        location = "" if location_raw.strip().lower() in vague else location_raw
+        salary_str = job.get("salary") or ""
+        # Normalize Built In salary format — no $ signs, e.g. "165K-195K Annually"
+        # Convert to "$165K-$195K/yr" which _parse_compensation handles natively
+        if salary_str and not salary_str.startswith("$"):
+            salary_str = salary_str.replace(" Annually", "/yr").replace(" Hourly", "/hr")
+            salary_str = re.sub(r"(\d+(?:\.\d+)?K)", r"$\1", salary_str)
+        url = job.get("url") or ""
+        source_url = f"https://builtin.com{url}" if url.startswith("/") else url
+        comp_low, comp_high = _parse_compensation(salary_str)
+        workplace = (
+            WorkplaceType.REMOTE if "remote" in workplace_raw else
+            WorkplaceType.HYBRID if "hybrid" in workplace_raw else
+            WorkplaceType.ONSITE if "in-office" in workplace_raw or "onsite" in workplace_raw else None
+        )
+        results.append(RawJobListing(
+            source="builtin",
+            title=title,
+            company=company,
+            location=location,
+            source_url=source_url,
+            compensation_low=comp_low,
+            compensation_high=comp_high,
+            workplace_type=workplace,
+        ))
+    return results
+
+
+async def scrape_builtin(state: PipelineState) -> dict:
+    """
+    Scrape Built In Chicago via Playwright (headless=False, no auth).
+    Card structure confirmed via Chrome DevTools inspection (March 2026):
+      [data-id="job-card"] contains lines: [company, title, date, workplace, location, salary?, level]
+      Job URL: card.querySelectorAll('a')[2].pathname → /job/{slug}/{id}
+    """
+    if async_playwright is None:
+        console.print("[yellow]⚠ Playwright not available — skipping Built In[/yellow]")
+        return {"raw_results": []}
+
+    params = state["search_params"]
+    search_url = (
+        f"https://builtin.com/jobs/chicago"
+        f"?search={quote_plus(params.query)}"
+    )
+    results: list[RawJobListing] = []
+    jobs_data: list[dict] = []
+    try:
+        import asyncio as _asyncio
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=False, channel="chrome")
+            page = await browser.new_page()
+            await page.goto(search_url, wait_until="domcontentloaded")
+            await _asyncio.sleep(3)
+            try:
+                await page.wait_for_selector("[data-id='job-card']", timeout=10000)
+            except Exception:
+                console.print("[yellow]⚠ Built In: job cards did not appear[/yellow]")
+                await browser.close()
+                return {"raw_results": []}
+            jobs_data = await page.evaluate("""() => {
+                const cards = document.querySelectorAll('[data-id="job-card"]');
+                return Array.from(cards).map(card => {
+                    const lines = card.innerText.split('\\n').map(s => s.trim()).filter(Boolean);
+                    const links = card.querySelectorAll('a');
+                    const jobLink = Array.from(links).find(a => a.pathname.startsWith('/job/'));
+                    const salaryLine = lines.find(l => l.match(/\\d+K.*Annually|\\d+K.*Hourly/i));
+                    // Structure: [company, title, date, workplace, location, (salary?), level]
+                    return {
+                        company: lines[0] || '',
+                        title: lines[1] || '',
+                        workplace: lines[3] || '',
+                        location: lines[4] || '',
+                        salary: salaryLine || '',
+                        url: jobLink ? jobLink.pathname : '',
+                    };
+                });
+            }""")
+            await browser.close()
+        results = _transform_builtin_jobs(jobs_data[:params.max_results_per_source])
+    except Exception as exc:
+        console.print(f"[yellow]⚠ Built In scrape error: {exc}[/yellow]")
+    console.print(f"[dim]Built In: {len(results)} listings[/dim]")
+    return {"raw_results": results}
+
+
+
+# ── Wellfound scraper (Playwright, no auth) ───────────────────────────────────
+
+
+def _transform_wellfound_jobs(jobs_data: list[dict]) -> list[RawJobListing]:
+    """
+    Transform raw JS-extracted Wellfound job data into RawJobListing objects.
+    Pure function — no browser dependency, fully unit testable.
+
+    Each dict has the shape returned by the Playwright page.evaluate():
+      { company, title, employment_type, salary, location, url }
+    Salary format: "$150k – $170k" or "" if not listed.
+    Location format: "Remote only • United States" or "Onsite or remote • NYC+2"
+    """
+    results: list[RawJobListing] = []
+    for job in jobs_data:
+        company = job.get("company", "") or "Unknown"
+        title = job.get("title", "")
+        if not title:
+            continue
+        salary_str = job.get("salary", "") or ""
+        location_raw = job.get("location", "") or ""
+        url = job.get("url", "") or ""
+        # Parse location and workplace from "Remote only • United States" pattern
+        if "•" in location_raw:
+            parts = [p.strip() for p in location_raw.split("•")]
+            workplace_hint = parts[0].lower()
+            location = parts[1] if len(parts) > 1 else ""
+        else:
+            workplace_hint = location_raw.lower()
+            location = ""
+        # Normalize vague country entries
+        vague = {"united states", "usa", "us", ""}
+        if location.lower() in vague:
+            location = ""
+        # Normalize salary: "$150k – $170k" → parseable by _parse_compensation
+        salary_str = salary_str.replace("k", "K").replace(" – ", "-").replace("–", "-")
+        comp_low, comp_high = _parse_compensation(salary_str)
+        workplace = (
+            WorkplaceType.HYBRID if "hybrid" in workplace_hint or "onsite or remote" in workplace_hint else
+            WorkplaceType.REMOTE if "remote" in workplace_hint else
+            WorkplaceType.ONSITE if "onsite" in workplace_hint else None
+        )
+        results.append(RawJobListing(
+            source="wellfound",
+            title=title,
+            company=company,
+            location=location,
+            source_url=url,
+            compensation_low=comp_low,
+            compensation_high=comp_high,
+            workplace_type=workplace,
+        ))
+    return results
+
+
+async def scrape_wellfound(state: PipelineState) -> dict:
+    """
+    PARKED — IP-based bot detection blocks Playwright (March 2026).
+    grep: WELLFOUND_PARKED
+
+    Wellfound returns "Access is temporarily restricted" citing automated
+    activity from the IP. Block is network-level, not session/cookie level —
+    persistent browser profiles do not help.
+
+    Card structure was fully confirmed via Chrome DevTools inspection and is
+    preserved in the commented implementation below. The _transform_wellfound_jobs()
+    function and tests are also preserved so the plumbing is ready when a
+    workaround is found.
+
+    Potential workarounds to research:
+      1. Residential proxy rotation
+      2. playwright-extra + puppeteer-extra-plugin-stealth
+      3. Official Wellfound API (requires partnership application)
+    """
+    console.print("[dim]Wellfound: parked (IP-based bot detection) — skipping[/dim]")
+    return {"raw_results": []}
+
+
+# # ── scrape_wellfound full implementation (WELLFOUND_PARKED) ──────────────────
+# # Uncomment and re-wire into SOURCE_NODE_MAP + build_discoverer_graph when
+# # a workaround for Wellfound's IP-based bot detection is found.
+# #
+# # Confirmed card structure (Chrome DevTools, March 2026):
+# #   Company cards: .mb-6.w-full.rounded.border.border-gray-400.bg-white
+# #   Job listings within card: .min-h-[50px] divs (one per role)
+# #   Lines: [title, employment_type, salary?, location?, exp?, date, Save, Apply]
+# #   Location: "Remote only • United States" or "Onsite or remote • City+N"
+# #   Apply link: a[href*="/jobs/"] → full URL e.g. wellfound.com/jobs/3938437-slug
+# #   Salary: "$150k – $170k" (starts with $, dash-separated)
+# #
+# async def _scrape_wellfound_impl(state: PipelineState) -> dict:
+#     if async_playwright is None:
+#         return {"raw_results": []}
+#     params = state["search_params"]
+#     search_url = (
+#         f"https://wellfound.com/role/r/software-engineer"
+#         f"?keywords={quote_plus(params.query)}"
+#     )
+#     results: list[RawJobListing] = []
+#     jobs_data: list[dict] = []
+#     try:
+#         import asyncio as _asyncio
+#         from pathlib import Path as _Path
+#         user_data_dir = str(
+#             _Path(__file__).parent.parent.parent / "playwright" / ".profiles" / "wellfound"
+#         )
+#         _Path(user_data_dir).mkdir(parents=True, exist_ok=True)
+#         async with async_playwright() as p:
+#             context = await p.chromium.launch_persistent_context(
+#                 user_data_dir, headless=False, channel="chrome",
+#             )
+#             page = context.pages[0] if context.pages else await context.new_page()
+#             await page.goto(search_url, wait_until="networkidle")
+#             await _asyncio.sleep(6)
+#             await page.wait_for_function("() => document.body !== null", timeout=10000)
+#             try:
+#                 await page.wait_for_selector(
+#                     ".mb-6.w-full.rounded.border.border-gray-400.bg-white",
+#                     timeout=15000,
+#                 )
+#             except Exception:
+#                 page_text = await page.evaluate(
+#                     "() => document.body?.innerText?.slice(0, 400) || 'no body'"
+#                 )
+#                 console.print(
+#                     f"[yellow]⚠ Wellfound: cards not found. Page: {page_text}[/yellow]"
+#                 )
+#                 await context.close()
+#                 return {"raw_results": []}
+#             jobs_data = await page.evaluate("""() => {
+#                 const cards = document.querySelectorAll(
+#                     '.mb-6.w-full.rounded.border.border-gray-400.bg-white'
+#                 );
+#                 const out = [];
+#                 cards.forEach(card => {
+#                     const company = card.innerText.split('\\n')[0].trim();
+#                     card.querySelectorAll('.min-h-\\\\[50px\\\\]').forEach(jd => {
+#                         const lines = jd.innerText.split('\\n').map(s => s.trim()).filter(Boolean);
+#                         const link = jd.querySelector('a[href*="/jobs/"]');
+#                         out.push({
+#                             company,
+#                             title: lines[0] || '',
+#                             salary: lines.find(l => l.startsWith('$')) || '',
+#                             location: lines.find(l => l.includes('•')) || '',
+#                             url: link ? link.href : '',
+#                         });
+#                     });
+#                 });
+#                 return out;
+#             }""")
+#             await context.close()
+#         results = _transform_wellfound_jobs(jobs_data[:params.max_results_per_source])
+#     except Exception as exc:
+#         console.print(f"[yellow]⚠ Wellfound scrape error: {exc}[/yellow]")
+#     console.print(f"[dim]Wellfound: {len(results)} listings[/dim]")
+#     return {"raw_results": results}
+
+
 SOURCE_NODE_MAP = {
     "indeed": "scrape_indeed",
     "dice": "scrape_dice",
     "linkedin": "scrape_linkedin",
     "ziprecruiter": "scrape_ziprecruiter",
+    "builtin": "scrape_builtin",
+    "target_companies": "scrape_target_companies",
+    # "wellfound": "scrape_wellfound",  # PARKED — IP-based bot detection blocks Playwright
+    #   Wellfound returns "Access is temporarily restricted" citing automated activity
+    #   from the IP. This is network-level, not session/cookie level — persistent
+    #   browser profiles don't help. Potential workarounds to research:
+    #   1. Residential proxy rotation
+    #   2. Playwright stealth plugin (playwright-extra + puppeteer-extra-plugin-stealth)
+    #   3. Official Wellfound API (requires partnership application)
+    #   The _transform_wellfound_jobs() function and tests are preserved below
+    #   so the plumbing is ready when a workaround is found.
+    #   grep: WELLFOUND_PARKED to find all related code
 }
 
 
@@ -616,6 +986,18 @@ async def merge_results(state: PipelineState) -> dict:
         console.print("[yellow]No raw results from any source.[/yellow]")
         return {"shortlist": [], "skipped": []}
 
+    title_allowed = _build_title_filter(
+        settings.title_filter_positive_list,
+        settings.title_filter_negative_list,
+    )
+    pre_count = len(raw)
+    raw = [r for r in raw if title_allowed(r.title)]
+    filtered_out = pre_count - len(raw)
+    if filtered_out:
+        console.print(
+            f"[dim]Title filter: dropped {filtered_out} of {pre_count} listings[/dim]"
+        )
+
     seen: dict[str, RawJobListing] = {}
     for listing in raw:
         fp = _make_fingerprint(listing.company, listing.title, listing.location)
@@ -623,16 +1005,25 @@ async def merge_results(state: PipelineState) -> dict:
             seen[fp] = listing
 
     suppress = {JobStatus.SKIPPED, JobStatus.APPLIED, JobStatus.SUBMITTED, JobStatus.OFFER}
+    note_set = {JobStatus.QUEUED, JobStatus.DOCS_DRAFT, JobStatus.DOCS_READY}
     previously_seen: dict[str, JobStatus] = {}
+    suppressed_company_roles: set[str] = set()
+    seen_company_roles: dict[str, JobStatus] = {}
     try:
         async with get_connection() as conn:
             async for row in await conn.execute(
-                "SELECT fingerprint, status FROM jobs WHERE fingerprint IN ({})".format(
+                "SELECT fingerprint, status, company, title FROM jobs WHERE fingerprint IN ({})".format(
                     ",".join("?" * len(seen))
                 ),
                 list(seen.keys()),
             ):
-                previously_seen[row["fingerprint"]] = JobStatus(row["status"])
+                status = JobStatus(row["status"])
+                previously_seen[row["fingerprint"]] = status
+                key = f"{(row['company'] or '').lower()}::{(row['title'] or '').lower()}"
+                if status in suppress:
+                    suppressed_company_roles.add(key)
+                elif status in note_set:
+                    seen_company_roles.setdefault(key, status)
     except Exception as exc:
         console.print(f"[yellow]⚠ DB lookup failed during merge: {exc}[/yellow]")
 
@@ -641,9 +1032,15 @@ async def merge_results(state: PipelineState) -> dict:
         prior = previously_seen.get(fp)
         if prior in suppress:
             continue
+        company_role_key = f"{raw_listing.company.lower()}::{raw_listing.title.lower()}"
+        if company_role_key in suppressed_company_roles:
+            continue
         job = JobListing(**raw_listing.model_dump(), fingerprint=fp, ats_type=detect_ats(raw_listing.apply_url))
-        if prior in (JobStatus.QUEUED, JobStatus.DOCS_DRAFT, JobStatus.DOCS_READY):
+        if prior in note_set:
             job.notes = f"[previously seen — status: {prior.value}]"
+        elif company_role_key in seen_company_roles:
+            cr_prior = seen_company_roles[company_role_key]
+            job.notes = f"[previously seen — status: {cr_prior.value}]"
         shortlist.append(job)
 
     suppressed = len(seen) - len(shortlist)
@@ -675,6 +1072,13 @@ async def persist_to_db(state: PipelineState) -> dict:
     """Write approved listings to jobs table with status=queued."""
     approved = state.get("shortlist", [])
     if not approved:
+        return {}
+    if state.get("dry_run"):
+        console.print(
+            f"DRY RUN — would save {len(approved)} jobs:", markup=False
+        )
+        for job in approved[:10]:
+            console.print(f"  {job.company}::{job.title}", markup=False)
         return {}
     params = state["search_params"]
     run_id = str(uuid4())
@@ -750,13 +1154,24 @@ def build_discoverer_graph() -> StateGraph:
     graph.add_node("scrape_dice", scrape_dice)
     graph.add_node("scrape_linkedin", scrape_linkedin)
     graph.add_node("scrape_ziprecruiter", scrape_ziprecruiter)
+    graph.add_node("scrape_builtin", scrape_builtin)
+    graph.add_node("scrape_target_companies", scrape_target_companies)
+    # graph.add_node("scrape_wellfound", scrape_wellfound)  # WELLFOUND_PARKED
     graph.add_node("merge_results", merge_results)
     graph.add_node("triage_interrupt", triage_interrupt)
     graph.add_node("persist_to_db", persist_to_db)
 
     graph.set_entry_point("parse_search_params")
     graph.add_conditional_edges("parse_search_params", fan_out_sources)
-    for scraper in ("scrape_indeed", "scrape_dice", "scrape_linkedin", "scrape_ziprecruiter"):
+    for scraper in (
+        "scrape_indeed",
+        "scrape_dice",
+        "scrape_linkedin",
+        "scrape_ziprecruiter",
+        "scrape_builtin",
+        "scrape_target_companies",
+    ):
+        # "scrape_wellfound" omitted — WELLFOUND_PARKED
         graph.add_edge(scraper, "merge_results")
     graph.add_edge("merge_results", "triage_interrupt")
     graph.add_edge("triage_interrupt", "persist_to_db")
