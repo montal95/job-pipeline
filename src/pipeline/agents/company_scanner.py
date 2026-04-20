@@ -44,6 +44,25 @@ COMPANIES_CONFIG_PATH: Path = (
 # don't get falsely classified as transient ReadTimeout failures.
 WATCHLIST_HTTP_TIMEOUT_SECS: float = 30.0
 
+# JSON-tuned headers for the public ATS APIs. Critically, we omit `br`
+# (brotli) from Accept-Encoding because httpx requires the optional
+# `brotli` (or `brotlicffi`) package to auto-decompress brotli responses,
+# and we don't ship it. Ashby's API serves brotli when the client
+# advertises it; without decompression support, resp.json() chokes on raw
+# compressed bytes and emits a misleading utf-8 decode error. Asking for
+# only gzip/deflate forces servers to fall back to formats httpx handles
+# natively via the stdlib.
+WATCHLIST_HEADERS: dict[str, str] = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate",
+}
+
 AtsMarker = Literal["greenhouse", "ashby", "lever"]
 
 _GREENHOUSE_BOARD = re.compile(
@@ -231,11 +250,9 @@ async def scrape_target_companies(state: dict) -> dict:
     if not resolved:
         return {"raw_results": []}
 
-    from pipeline.agents.discoverer import HEADERS
-
     results: list[RawJobListing] = []
     async with httpx.AsyncClient(
-        headers=HEADERS, timeout=WATCHLIST_HTTP_TIMEOUT_SECS
+        headers=WATCHLIST_HEADERS, timeout=WATCHLIST_HTTP_TIMEOUT_SECS
     ) as client:
         fetches = [client.get(api_url) for (_, api_url, _) in resolved]
         responses = await asyncio.gather(*fetches, return_exceptions=True)
