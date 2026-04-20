@@ -11,27 +11,32 @@
 #     - name: Human-readable name (used for logging and `company` on listings)
 #       url:  Public careers page URL (greenhouse.io, ashbyhq.com, or lever.co)
 #       enabled: true | false
+#
+# Verifying a slug: open the URL in a browser. If it shows job listings, the
+# slug is correct. If it 404s, search "<company> site:boards.greenhouse.io"
+# (or ashbyhq.com / lever.co) — many companies use a non-obvious slug
+# (e.g. Spring Health uses "springhealth66", not "springhealth").
 companies:
   - name: Spring Health
-    url: https://jobs.ashbyhq.com/spring-health
+    url: https://boards.greenhouse.io/springhealth66
     enabled: true
   - name: Headway
-    url: https://jobs.ashbyhq.com/headway
+    url: https://boards.greenhouse.io/headway
     enabled: true
   - name: Grow Therapy
-    url: https://jobs.lever.co/growtherapy
+    url: https://boards.greenhouse.io/growtherapy
     enabled: true
   - name: Lyra Health
-    url: https://boards.greenhouse.io/lyrahealth
+    url: https://jobs.lever.co/lyrahealth
     enabled: true
   - name: Cerebral
     url: https://boards.greenhouse.io/cerebral
     enabled: true
   - name: Alma
-    url: https://jobs.ashbyhq.com/helloalma
+    url: https://boards.greenhouse.io/alma
     enabled: true
   - name: Talkiatry
-    url: https://boards.greenhouse.io/talkiatry
+    url: https://jobs.ashbyhq.com/talkiatry
     enabled: true
   - name: Chime
     url: https://boards.greenhouse.io/chime
