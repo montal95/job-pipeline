@@ -279,6 +279,59 @@ companies:
 
 
 @pytest.mark.asyncio
+async def test_scrape_target_companies_does_not_request_brotli(monkeypatch, tmp_path):
+    """Ashby's API serves brotli when the client advertises 'br' in
+    Accept-Encoding. httpx only auto-decompresses brotli when the optional
+    'brotli' (or 'brotlicffi') package is installed — which we don't ship.
+    The result was bytes that look like gzip leaking into resp.json() and
+    crashing with a misleading utf-8 decode error.
+
+    This test pins the watchlist scanner to headers that do NOT request
+    brotli, forcing servers to fall back to gzip (which httpx handles
+    natively via the stdlib)."""
+    from pipeline.agents import company_scanner
+
+    cfg = tmp_path / "companies.yml"
+    cfg.write_text(
+        """
+companies:
+  - name: Some Co
+    url: https://boards.greenhouse.io/someco
+    enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(company_scanner, "COMPANIES_CONFIG_PATH", cfg)
+
+    captured_kwargs: list[dict] = []
+
+    def _capturing_client_factory(*args, **kwargs):
+        captured_kwargs.append(kwargs)
+        return _FakeAsyncClient(
+            {
+                "https://boards-api.greenhouse.io/v1/boards/someco/jobs":
+                    _FakeResponse(json_data={"jobs": []}),
+            },
+            [],
+        )
+
+    monkeypatch.setattr(
+        company_scanner.httpx, "AsyncClient", _capturing_client_factory
+    )
+
+    await company_scanner.scrape_target_companies({})
+
+    assert captured_kwargs, "httpx.AsyncClient was never instantiated"
+    headers = captured_kwargs[0].get("headers") or {}
+    accept_enc = headers.get("Accept-Encoding", "")
+    assert "br" not in accept_enc.lower().split(", "), (
+        f"Accept-Encoding includes brotli ({accept_enc!r}); httpx cannot "
+        "auto-decompress brotli without the optional 'brotli' package, so "
+        "Ashby's response will arrive as raw bytes and json() will crash"
+    )
+
+
+@pytest.mark.asyncio
 async def test_scrape_target_companies_uses_generous_timeout(monkeypatch, tmp_path):
     """Lever boards with 400+ postings take >15s to respond; the watchlist
     scanner must allow a longer timeout than the marketplace scrapers, or
