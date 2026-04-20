@@ -279,6 +279,59 @@ companies:
 
 
 @pytest.mark.asyncio
+async def test_scrape_target_companies_logs_http_status_on_4xx(monkeypatch, tmp_path, capsys):
+    """A 404 response (typo'd slug) must surface as 'HTTP 404 — slug probably
+    wrong', not as the misleading 'parse failed (Expecting value: line 1
+    column 1)' that bubbles up from json() trying to decode 'Not Found'.
+
+    Real httpx.get() never raises on non-2xx status — the response comes back
+    intact and you opt into raise_for_status(). The scraper must check status
+    explicitly before calling resp.json()."""
+    from pipeline.agents import company_scanner
+
+    cfg = tmp_path / "companies.yml"
+    cfg.write_text(
+        """
+companies:
+  - name: Typo Co
+    url: https://boards.greenhouse.io/typo-slug
+    enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(company_scanner, "COMPANIES_CONFIG_PATH", cfg)
+
+    # Fake that mirrors real httpx behavior: get() returns the response even
+    # for 4xx/5xx; json() on a non-JSON body raises ValueError (as the real
+    # stdlib decoder does on "Not Found").
+    class _RealisticResponse:
+        status_code = 404
+        text = "Not Found"
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    class _RealisticClient:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return None
+        async def get(self, url, *a, **kw):
+            return _RealisticResponse()
+
+    monkeypatch.setattr(
+        company_scanner.httpx, "AsyncClient",
+        lambda *a, **kw: _RealisticClient(),
+    )
+
+    result = await company_scanner.scrape_target_companies({})
+    captured = capsys.readouterr()
+
+    assert result == {"raw_results": []}
+    assert "HTTP 404" in captured.out
+    assert "parse failed" not in captured.out
+
+
+@pytest.mark.asyncio
 async def test_scrape_target_companies_merges_across_ats_types(monkeypatch, tmp_path):
     from pipeline.agents import company_scanner
 
