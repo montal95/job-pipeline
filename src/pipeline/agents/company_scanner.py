@@ -38,6 +38,12 @@ COMPANIES_CONFIG_PATH: Path = (
     Path(__file__).parent.parent.parent.parent / "config" / "companies.yml"
 )
 
+# Lever boards with hundreds of postings (e.g. Lyra Health at ~400 jobs)
+# routinely take 20-25s to respond. The marketplace scrapers' 15s ceiling
+# is too tight for the watchlist scan; bump it so legitimate large boards
+# don't get falsely classified as transient ReadTimeout failures.
+WATCHLIST_HTTP_TIMEOUT_SECS: float = 30.0
+
 AtsMarker = Literal["greenhouse", "ashby", "lever"]
 
 _GREENHOUSE_BOARD = re.compile(
@@ -228,7 +234,9 @@ async def scrape_target_companies(state: dict) -> dict:
     from pipeline.agents.discoverer import HEADERS
 
     results: list[RawJobListing] = []
-    async with httpx.AsyncClient(headers=HEADERS, timeout=15) as client:
+    async with httpx.AsyncClient(
+        headers=HEADERS, timeout=WATCHLIST_HTTP_TIMEOUT_SECS
+    ) as client:
         fetches = [client.get(api_url) for (_, api_url, _) in resolved]
         responses = await asyncio.gather(*fetches, return_exceptions=True)
 
