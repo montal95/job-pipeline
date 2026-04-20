@@ -240,6 +240,15 @@ async def scrape_target_companies(state: dict) -> dict:
                 style="yellow",
             )
             continue
+        # httpx.get() doesn't raise on 4xx/5xx; check explicitly so a typo'd
+        # slug surfaces as "HTTP 404" instead of a confusing JSON decode error.
+        if resp.status_code >= 400:
+            console.print(
+                f"⚠ {name}: HTTP {resp.status_code} — slug probably wrong",
+                markup=False,
+                style="yellow",
+            )
+            continue
         try:
             payload = resp.json()
             parser = _PARSER_BY_MARKER[marker]
