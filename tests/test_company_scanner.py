@@ -279,6 +279,54 @@ companies:
 
 
 @pytest.mark.asyncio
+async def test_scrape_target_companies_uses_generous_timeout(monkeypatch, tmp_path):
+    """Lever boards with 400+ postings take >15s to respond; the watchlist
+    scanner must allow a longer timeout than the marketplace scrapers, or
+    legitimate large boards get falsely classified as transient failures.
+
+    Regression guard: pins the AsyncClient timeout at >= 30s. If a future
+    refactor moves to per-request timeouts, update this test accordingly."""
+    from pipeline.agents import company_scanner
+
+    cfg = tmp_path / "companies.yml"
+    cfg.write_text(
+        """
+companies:
+  - name: Some Co
+    url: https://boards.greenhouse.io/someco
+    enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(company_scanner, "COMPANIES_CONFIG_PATH", cfg)
+
+    captured_kwargs: list[dict] = []
+
+    def _capturing_client_factory(*args, **kwargs):
+        captured_kwargs.append(kwargs)
+        return _FakeAsyncClient(
+            {
+                "https://boards-api.greenhouse.io/v1/boards/someco/jobs":
+                    _FakeResponse(json_data={"jobs": []}),
+            },
+            [],
+        )
+
+    monkeypatch.setattr(
+        company_scanner.httpx, "AsyncClient", _capturing_client_factory
+    )
+
+    await company_scanner.scrape_target_companies({})
+
+    assert captured_kwargs, "httpx.AsyncClient was never instantiated"
+    timeout = captured_kwargs[0].get("timeout", 0)
+    assert timeout >= 30, (
+        f"watchlist timeout is {timeout}s; should be >=30s to accommodate "
+        "large Lever boards"
+    )
+
+
+@pytest.mark.asyncio
 async def test_scrape_target_companies_logs_http_status_on_4xx(monkeypatch, tmp_path, capsys):
     """A 404 response (typo'd slug) must surface as 'HTTP 404 — slug probably
     wrong', not as the misleading 'parse failed (Expecting value: line 1
